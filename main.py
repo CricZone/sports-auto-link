@@ -24,7 +24,6 @@ def clean_name(val):
     if not val:
         return ""
     w = str(val).lower()
-    # সাধারণ ফুটবল/ক্রিকেট ট্যাগ বাদ দেওয়া
     w = re.sub(r'\b(fc|cf|sc|united|city|club|women|vs|v)\b', '', w)
     return re.sub(r'[^a-z0-9]', '', w).strip()
 
@@ -52,8 +51,8 @@ def format_links_data(streaming_links):
         if not isinstance(item, dict):
             continue
 
-        name = item.get("name") or f"Server {idx + 1}"
-        url = item.get("link") or item.get("url") or ""
+        name = str(item.get("name") or f"Stream {idx + 1}").strip()
+        url = str(item.get("link") or item.get("url") or "").strip()
 
         ua = "Mozilla/5.0"
         if "|user-agent=" in url:
@@ -61,14 +60,15 @@ def format_links_data(streaming_links):
             url = parts[0]
             ua = parts[1]
 
-        if url and str(url).startswith("http"):
+        if url.startswith("http"):
+            # অ্যাডমিন অ্যাপের স্ট্যান্ডার্ড লিঙ্ক অবজেক্ট ফরম্যাট
             formatted.append({
-                "name": name.strip(),
-                "url": url.strip(),
-                "stream_url": url.strip(),
+                "name": name,
+                "url": url,
+                "type": "mpd" if ".mpd" in url.lower() else "m3u8",
                 "headers": {"User-Agent": ua},
-                "user_agent": ua,
-                "type": "mpd" if ".mpd" in url.lower() else ("m3u8" if ".m3u8" in url.lower() else "stream")
+                "tokenApi": "",
+                "api": ""
             })
     return formatted
 
@@ -90,7 +90,6 @@ def sync_manual_events():
 
     print(f"Total Matches in Feed: {len(live_feed)}")
 
-    # ফিডের ডেটা ইনডেক্সিং
     indexed_feed = []
     for f in live_feed:
         t_a = clean_name(f.get("teamAName") or f.get("teamA") or "")
@@ -106,11 +105,9 @@ def sync_manual_events():
                 "streaming_links": links
             })
 
-    updated_count = 0
-
+    # শুধুমাত্র ফিওরেন্টিনা vs নাপোলি বা আপনার অ্যাড করা ম্যাচগুলোতে ট্রাই করা
     for item_db in my_events:
         event_id = item_db.get("id")
-        links_path = str(item_db.get("linksPath") or item_db.get("links") or "")
 
         ev_data = item_db
         if "event" in item_db and isinstance(item_db["event"], str):
@@ -127,7 +124,6 @@ def sync_manual_events():
 
         matched_match = None
         for inf in indexed_feed:
-            # নিখুঁত ম্যাচিং: দুই দলের নাম মিললে সেরা, না হলে বড় নামের নিখুঁত মিল
             both_match = (my_a == inf["teamA"] and my_b == inf["teamB"]) or (my_a == inf["teamB"] and my_b == inf["teamA"])
             single_strong_a = len(my_a) >= 5 and (my_a == inf["teamA"] or my_a == inf["teamB"])
             single_strong_b = len(my_b) >= 5 and (my_b == inf["teamA"] or my_b == inf["teamB"])
@@ -144,11 +140,11 @@ def sync_manual_events():
             continue
 
         print(f"\nUPDATING -> ID: {event_id} | Panel: [{ev_data.get('teamAName')} vs {ev_data.get('teamBName')}]")
-        print(f"Matched with Feed: [{matched_match['raw_teamA']} vs {matched_match['raw_teamB']}]")
+
+        # linksPath সঠিকভাবে নির্ধারণ
+        links_path = str(item_db.get("linksPath") or ev_data.get("linksPath") or ev_data.get("links") or f"links/{event_id}")
 
         event_str = item_db["event"] if ("event" in item_db and isinstance(item_db["event"], str)) else json.dumps(ev_data)
-        if not links_path:
-            links_path = str(ev_data.get("links") or ev_data.get("linksPath") or "")
 
         payload = {
             "id": str(event_id),
@@ -159,14 +155,14 @@ def sync_manual_events():
         }
 
         try:
-            up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
-            print(f"Server Status: {up_res.status_code} | Links Added: {len(formatted_links)}")
-            if up_res.status_code == 200:
-                updated_count += 1
+            up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=15)
+            print(f"Server Status: {up_res.status_code}")
+            print(f"Server Full Response: {up_res.text}")
         except Exception as e:
             print("Update failed:", e)
-
-    print(f"\nALL SYNCED! Total Correctly Updated: {updated_count}")
+        
+        # প্রথম ম্যাচটির রেসপন্স দেখার জন্য ব্রেক
+        break
 
 if __name__ == "__main__":
     sync_manual_events()
