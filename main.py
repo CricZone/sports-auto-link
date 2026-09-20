@@ -86,28 +86,36 @@ def sync_manual_events():
         print("Feed load error:", e)
         return
 
-    for event in my_events:
-        event_name = str(event.get("eventName") or event.get("title") or "").strip()
-        team_a = str(event.get("teamAName") or event.get("team1") or "").strip()
-        team_b = str(event.get("teamBName") or event.get("team2") or "").strip()
-        event_id = event.get("id")
-        links_path = str(event.get("linksPath") or event.get("links") or "")
+    for item_db in my_events:
+        event_id = item_db.get("id")
+        links_path = str(item_db.get("linksPath") or item_db.get("links") or "")
+        
+        # 'event' অবজেক্টটি স্ট্রিং আকারে থাকলে পার্স করা
+        ev_data = item_db
+        if "event" in item_db and isinstance(item_db["event"], str):
+            try:
+                ev_data = json.loads(item_db["event"])
+            except:
+                pass
+
+        event_name = str(ev_data.get("eventName") or ev_data.get("title") or item_db.get("eventName") or "").strip()
+        team_a = str(ev_data.get("teamAName") or ev_data.get("team1") or "").strip()
+        team_b = str(ev_data.get("teamBName") or ev_data.get("team2") or "").strip()
 
         print(f"\n--- Checking Saved Event ---")
         print(f"ID: {event_id} | Name: '{event_name}' | TeamA: '{team_a}' | TeamB: '{team_b}'")
 
-        # সোর্স ফিডে কি কি ম্যাচ আছে তার সাথে তুলনা
         matched_feed = None
-        for item in live_feed:
-            f_name = str(item.get("title") or item.get("name") or "").strip()
+        for f in live_feed:
+            f_name = str(f.get("title") or f.get("name") or "").strip()
             
-            # নামের যে কোনো অংশ মিললেই ম্যাচ হিসেবে ধরবে
+            # নামের মিল যাচাই
             cond1 = f_name and event_name and (f_name.lower() in event_name.lower() or event_name.lower() in f_name.lower())
             cond2 = team_a and team_a.lower() in f_name.lower()
             cond3 = team_b and team_b.lower() in f_name.lower()
 
             if cond1 or cond2 or cond3:
-                matched_feed = item
+                matched_feed = f
                 print(f"-> MATCHED with Feed: '{f_name}'")
                 break
 
@@ -123,9 +131,14 @@ def sync_manual_events():
         formatted_links = format_links_data(raw_links)
         links_data_str = json.dumps(formatted_links)
 
+        # সার্ভারে আসল স্ট্রাকচারে পাঠানো
+        event_str = item_db["event"] if ("event" in item_db and isinstance(item_db["event"], str)) else json.dumps(ev_data)
+        if not links_path:
+            links_path = str(ev_data.get("links") or ev_data.get("linksPath") or "")
+
         payload = {
             "id": str(event_id),
-            "event": json.dumps(event) if isinstance(event, dict) else str(event),
+            "event": event_str,
             "linksPath": links_path,
             "linksData": links_data_str,
             "requestData": generate_security_token()
