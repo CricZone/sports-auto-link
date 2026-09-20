@@ -51,7 +51,7 @@ def format_links_data(streaming_links):
         if not isinstance(item, dict):
             continue
 
-        name = str(item.get("name") or f"Stream {idx + 1}").strip()
+        name = str(item.get("name") or f"Server {idx + 1}").strip()
         url = str(item.get("link") or item.get("url") or "").strip()
 
         ua = "Mozilla/5.0"
@@ -61,11 +61,15 @@ def format_links_data(streaming_links):
             ua = parts[1]
 
         if url.startswith("http"):
+            # অ্যাপ ঠিক এই 'link' ফিল্ডটিই খুঁজছে
             formatted.append({
                 "name": name,
+                "link": url,
                 "url": url,
-                "type": "mpd" if ".mpd" in url.lower() else "m3u8",
+                "stream_url": url,
                 "headers": {"User-Agent": ua},
+                "user_agent": ua,
+                "type": "mpd" if ".mpd" in url.lower() else "m3u8",
                 "tokenApi": "",
                 "api": ""
             })
