@@ -20,8 +20,13 @@ def get_headers():
         "User-Agent": "okhttp/4.9.2"
     }
 
+def clean_word(word):
+    """টিমের সাধারণ শব্দ বাদ দিয়ে মূল নাম বের করা"""
+    w = str(word).lower()
+    w = re.sub(r'\b(fc|cf|sc|united|city|club|women)\b', '', w)
+    return re.sub(r'[^a-zA-Z0-9]', '', w).strip()
+
 def get_my_saved_events():
-    """g7/j ক্লাসের লজিক অনুযায়ী from: events দিয়ে ম্যাচ ডেটা আনা"""
     token = generate_security_token()
     payload = {
         "from": "events",
@@ -69,7 +74,7 @@ def format_links_data(raw_links):
 
 def sync_manual_events():
     my_events = get_my_saved_events()
-    print(f"Total Manually Added Events Found: {len(my_events)}")
+    print(f"Total Manually Added Events in Panel: {len(my_events)}")
 
     if not my_events:
         print("No events found in DB.")
@@ -87,11 +92,12 @@ def sync_manual_events():
         print("Feed load error:", e)
         return
 
+    print(f"Total Matches in Online Feed: {len(live_feed)}")
+
     for item_db in my_events:
         event_id = item_db.get("id")
         links_path = str(item_db.get("linksPath") or item_db.get("links") or "")
         
-        # event ফিল্ডটি স্ট্রিং বা ডিকশনারি হতে পারে
         ev_data = item_db
         if "event" in item_db and isinstance(item_db["event"], str):
             try:
@@ -99,43 +105,43 @@ def sync_manual_events():
             except:
                 pass
 
-        event_name = str(ev_data.get("eventName") or ev_data.get("title") or item_db.get("eventName") or "").strip()
-        team_a = str(ev_data.get("teamAName") or ev_data.get("team1") or "").strip()
-        team_b = str(ev_data.get("teamBName") or ev_data.get("team2") or "").strip()
+        event_name = str(ev_data.get("eventName") or item_db.get("eventName") or "").strip()
+        team_a = str(ev_data.get("teamAName") or item_db.get("teamAName") or "").strip()
+        team_b = str(ev_data.get("teamBName") or item_db.get("teamBName") or "").strip()
 
-        print(f"\n--- Checking Saved Event ---")
-        print(f"ID: {event_id} | Name: '{event_name}' | TeamA: '{team_a}' | TeamB: '{team_b}'")
+        core_a = clean_word(team_a)
+        core_b = clean_word(team_b)
 
         matched_feed = None
         for f in live_feed:
-            f_name = str(f.get("title") or f.get("name") or "").strip()
+            f_title = str(f.get("title") or f.get("name") or "").lower()
             
-            cond1 = f_name and event_name and (f_name.lower() in event_name.lower() or event_name.lower() in f_name.lower())
-            cond2 = team_a and team_a.lower() in f_name.lower()
-            cond3 = team_b and team_b.lower() in f_name.lower()
-
-            if cond1 or cond2 or cond3:
+            # ফিডে দুই দলের নাম অথবা অন্তত মূল দলের নাম থাকলে ম্যাচ ধরবে
+            cond_a = core_a and len(core_a) >= 3 and core_a in f_title
+            cond_b = core_b and len(core_b) >= 3 and core_b in f_title
+            
+            if (cond_a and cond_b) or cond_a or cond_b:
                 matched_feed = f
-                print(f"-> MATCHED with Feed: '{f_name}'")
                 break
 
         if not matched_feed:
-            print(f"-> No match found in feed for this event.")
             continue
 
         raw_links = matched_feed.get("links", [])
         if not raw_links:
-            print("-> Match found, but feed links are empty.")
             continue
 
         formatted_links = format_links_data(raw_links)
+        if not formatted_links:
+            continue
+
+        print(f"-> MATCHED: [{team_a} vs {team_b}] with Feed: [{matched_feed.get('title')}]")
         links_data_str = json.dumps(formatted_links)
 
         event_str = item_db["event"] if ("event" in item_db and isinstance(item_db["event"], str)) else json.dumps(ev_data)
         if not links_path:
             links_path = str(ev_data.get("links") or ev_data.get("linksPath") or "")
 
-        # b0.smali এর মেথড X অনুযায়ী পে-লোড
         payload = {
             "id": str(event_id),
             "event": event_str,
@@ -151,8 +157,7 @@ def sync_manual_events():
             timeout=15
         )
 
-        print(f"Update Status: {up_res.status_code}")
-        print(f"Server Response: {up_res.text}")
+        print(f"Update Result Status: {up_res.status_code} | Links Added: {len(formatted_links)}")
 
 if __name__ == "__main__":
     sync_manual_events()
