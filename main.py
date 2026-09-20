@@ -21,7 +21,7 @@ def get_headers():
     }
 
 def get_my_saved_events():
-    """Apnar manually add kora match gulo server theke niye asha"""
+    """সার্ভার থেকে আপনার অ্যাড করা ম্যাচগুলো আনা"""
     payload = {"requestData": generate_security_token()}
     try:
         res = requests.post(BASE_URL + "admin/select", json=payload, headers=get_headers(), timeout=15)
@@ -35,8 +35,8 @@ def get_my_saved_events():
         print("Error fetching saved events:", e)
     return []
 
-def format_match_links(raw_links):
-    """Feed-er raw link gulo ke player format-e sajano"""
+def format_links_data(raw_links):
+    """অ্যাপের প্লেয়ার যে ফরম্যাটে linksData চায়"""
     formatted = []
     if not raw_links:
         return formatted
@@ -60,14 +60,14 @@ def format_match_links(raw_links):
                     "stream_url": url,
                     "headers": headers_dict,
                     "user_agent": "Mozilla/5.0",
-                    "type": "m3u8" if ".m3u8" in url else "stream"
+                    "type": "m3u8" if ".m3u8" in str(url).lower() else "stream"
                 })
     return formatted
 
-def sync_manual_events_only():
+def sync_manual_events():
     my_events = get_my_saved_events()
     if not my_events:
-        print("Apnar panel-e kono match add kora nei.")
+        print("আপনার প্যানেলে কোনো ম্যাচ অ্যাড করা নেই।")
         return
 
     try:
@@ -82,45 +82,55 @@ def sync_manual_events_only():
         print("Feed load error:", e)
         return
 
-    print(f"Total Manually Added Matches: {len(my_events)}")
+    print(f"Total Manually Added Events: {len(my_events)}")
 
-    # Shudhu apnar manually add kora match-er jonno link khujbe
     for event in my_events:
         event_name = str(event.get("eventName") or event.get("title") or event.get("name") or "").strip().lower()
-        links_path = event.get("links") or event.get("linksPath") or ""
+        team_a = str(event.get("teamAName") or event.get("team1") or "").strip().lower()
+        team_b = str(event.get("teamBName") or event.get("team2") or "").strip().lower()
         event_id = event.get("id")
+        links_path = str(event.get("linksPath") or event.get("links") or "")
 
-        if not event_name:
+        if not event_id:
             continue
 
         for item in live_feed:
             feed_name = str(item.get("title") or item.get("name") or "").strip().lower()
             raw_links = item.get("links", [])
 
-            # Name match korle ebong active streaming link thakle
-            if (feed_name in event_name or event_name in feed_name) and raw_links:
-                formatted_links = format_match_links(raw_links)
+            # নাম অথবা টিমের মিল পরীক্ষা
+            is_matched = False
+            if feed_name and event_name and (feed_name in event_name or event_name in feed_name):
+                is_matched = True
+            elif team_a and team_a in feed_name:
+                is_matched = True
+
+            if is_matched and raw_links:
+                formatted_links = format_links_data(raw_links)
                 if not formatted_links:
                     continue
 
-                links_str = json.dumps(formatted_links)
+                links_data_str = json.dumps(formatted_links)
 
-                update_payload = {
-                    "links": links_str,
+                # Smali মেথড X এর হুবহু প্যারামিটার
+                payload = {
+                    "id": str(event_id),
+                    "event": json.dumps(event) if isinstance(event, dict) else str(event),
                     "linksPath": links_path,
+                    "linksData": links_data_str,
                     "requestData": generate_security_token()
                 }
-                if event_id:
-                    update_payload["id"] = event_id
 
                 up_res = requests.post(
                     BASE_URL + "admin/update_event",
-                    json=update_payload,
+                    json=payload,
                     headers=get_headers(),
                     timeout=15
                 )
-                print(f"Updated: [{event_name}] | Status: {up_res.status_code} | Links Count: {len(formatted_links)}")
+
+                print(f"Updated Event [{event_name}] | Status: {up_res.status_code} | Links: {len(formatted_links)}")
+                print(f"Server Response: {up_res.text}")
                 break
 
 if __name__ == "__main__":
-    sync_manual_events_only()
+    sync_manual_events()
