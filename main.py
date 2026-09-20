@@ -21,14 +21,19 @@ def get_headers():
     }
 
 def get_my_saved_events():
-    """সার্ভার থেকে আপনার অ্যাড করা ম্যাচগুলো আনা"""
-    payload = {"requestData": generate_security_token()}
+    """MainWindow ক্লাসের লজিক অনুযায়ী from: app দিয়ে ম্যাচ ডেটা আনা"""
+    token = generate_security_token()
+    payload = {
+        "from": "app",
+        "requestData": token
+    }
     try:
         res = requests.post(BASE_URL + "admin/select", json=payload, headers=get_headers(), timeout=15)
         if res.status_code == 200:
             data = res.json()
             if isinstance(data, dict):
-                return data.get("events", [])
+                # events অ্যারে বা মূল তালিকা খুঁজে বের করা
+                return data.get("events") or data.get("live_events") or data.get("data") or []
             elif isinstance(data, list):
                 return data
     except Exception as e:
@@ -36,7 +41,7 @@ def get_my_saved_events():
     return []
 
 def format_links_data(raw_links):
-    """অ্যাপের প্লেয়ার যে ফরম্যাটে linksData চায়"""
+    """প্লেয়ার যে ফরম্যাটে linksData রিসিভ করে"""
     formatted = []
     if not raw_links:
         return formatted
@@ -66,8 +71,10 @@ def format_links_data(raw_links):
 
 def sync_manual_events():
     my_events = get_my_saved_events()
+    print(f"Total Manually Added Events Found: {len(my_events)}")
+
     if not my_events:
-        print("আপনার প্যানেলে কোনো ম্যাচ অ্যাড করা নেই।")
+        print("কোনো ইভেন্ট পাওয়া যায়নি। প্যানেলে ম্যাচ তৈরি করা আছে কি না যাচাই করুন।")
         return
 
     try:
@@ -81,8 +88,6 @@ def sync_manual_events():
     except Exception as e:
         print("Feed load error:", e)
         return
-
-    print(f"Total Manually Added Events: {len(my_events)}")
 
     for event in my_events:
         event_name = str(event.get("eventName") or event.get("title") or event.get("name") or "").strip().lower()
@@ -98,7 +103,7 @@ def sync_manual_events():
             feed_name = str(item.get("title") or item.get("name") or "").strip().lower()
             raw_links = item.get("links", [])
 
-            # নাম অথবা টিমের মিল পরীক্ষা
+            # দলের নাম অথবা টাইটেল দিয়ে মিল যাচাই
             is_matched = False
             if feed_name and event_name and (feed_name in event_name or event_name in feed_name):
                 is_matched = True
@@ -112,7 +117,7 @@ def sync_manual_events():
 
                 links_data_str = json.dumps(formatted_links)
 
-                # Smali মেথড X এর হুবহু প্যারামিটার
+                # b0 ক্লাসের মেথড X এর স্ট্রাকচার
                 payload = {
                     "id": str(event_id),
                     "event": json.dumps(event) if isinstance(event, dict) else str(event),
@@ -129,7 +134,6 @@ def sync_manual_events():
                 )
 
                 print(f"Updated Event [{event_name}] | Status: {up_res.status_code} | Links: {len(formatted_links)}")
-                print(f"Server Response: {up_res.text}")
                 break
 
 if __name__ == "__main__":
