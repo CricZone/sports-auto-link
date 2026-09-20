@@ -20,82 +20,107 @@ def get_headers():
         "User-Agent": "okhttp/4.9.2"
     }
 
-def clean_filename(name):
-    return re.sub(r'[^a-zA-Z0-9_-]', '_', name.strip().lower())
+def get_my_saved_events():
+    """Apnar manually add kora match gulo server theke niye asha"""
+    payload = {"requestData": generate_security_token()}
+    try:
+        res = requests.post(BASE_URL + "admin/select", json=payload, headers=get_headers(), timeout=15)
+        if res.status_code == 200:
+            data = res.json()
+            if isinstance(data, dict):
+                return data.get("events", [])
+            elif isinstance(data, list):
+                return data
+    except Exception as e:
+        print("Error fetching saved events:", e)
+    return []
 
-def sync_all_events():
-    print("Fetching feed from source...")
+def format_match_links(raw_links):
+    """Feed-er raw link gulo ke player format-e sajano"""
+    formatted = []
+    if not raw_links:
+        return formatted
+
+    if isinstance(raw_links, list):
+        for idx, item in enumerate(raw_links):
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("title") or f"Server {idx + 1}"
+                url = item.get("url") or item.get("link") or item.get("stream_url") or ""
+                ua = item.get("user_agent") or item.get("headers", {}).get("User-Agent") or "Mozilla/5.0"
+                headers_dict = item.get("headers") or {"User-Agent": ua}
+            else:
+                name = f"Live Stream {idx + 1}"
+                url = str(item)
+                headers_dict = {"User-Agent": "Mozilla/5.0"}
+
+            if url and str(url).startswith("http"):
+                formatted.append({
+                    "name": name,
+                    "url": url,
+                    "stream_url": url,
+                    "headers": headers_dict,
+                    "user_agent": "Mozilla/5.0",
+                    "type": "m3u8" if ".m3u8" in url else "stream"
+                })
+    return formatted
+
+def sync_manual_events_only():
+    my_events = get_my_saved_events()
+    if not my_events:
+        print("Apnar panel-e kono match add kora nei.")
+        return
+
     try:
         res = requests.get(FEED_SOURCE, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
         if res.status_code != 200:
-            print(f"Feed error: {res.status_code}")
+            print("Feed fetch failed:", res.status_code)
             return
 
         raw_data = res.json()
-        matches = raw_data if isinstance(raw_data, list) else raw_data.get("matches", raw_data.get("events", []))
-
-        if not matches:
-            print("No matches found.")
-            return
-
-        now = datetime.now()
-        cur_date = now.strftime("%Y-%m-%d")
-        cur_time = now.strftime("%I:%M %p")
-
-        for m in matches:
-            event_name = m.get("title") or m.get("name") or "Live Match"
-            team_a = m.get("team1") or m.get("teamA") or "Team A"
-            team_b = m.get("team2") or m.get("teamB") or "Team B"
-            
-            # যদি সরাসরি টিম না থাকে টাইটেল থেকে আলাদা করা
-            if " vs " in event_name.lower() and (team_a == "Team A" or not team_a):
-                parts = re.split(r'\s+vs\s+', event_name, flags=re.IGNORECASE)
-                if len(parts) >= 2:
-                    team_a, team_b = parts[0].strip(), parts[1].strip()
-
-            logo_a = m.get("team1_logo") or m.get("logo1") or "https://dlsports.top/default.png"
-            logo_b = m.get("team2_logo") or m.get("logo2") or "https://dlsports.top/default.png"
-            event_logo = m.get("logo") or logo_a
-
-            links = m.get("links", [])
-            links_str = json.dumps(links) if isinstance(links, list) else str(links)
-            links_path = f"{clean_filename(event_name)}_{clean_filename(team_a)}_{clean_filename(team_b)}"
-
-            # ক্লাসের কোড অনুযায়ী "event" অবজেক্ট প্রস্তুত
-            event_dict = {
-                "visible": True,
-                "isHot": True,
-                "priority": 1,
-                "category": m.get("category", "Live Sports"),
-                "eventName": event_name,
-                "eventLogo": event_logo,
-                "teamAName": team_a,
-                "teamBName": team_b,
-                "teamAFlag": logo_a,
-                "teamBFlag": logo_b,
-                "date": m.get("date", cur_date),
-                "time": m.get("time", cur_time),
-                "notiThumb": "",
-                "countryCodes": "",
-                "whitelistCountryCodes": "",
-                "messages": "{}",
-                "links": links_path
-            }
-
-            # ক্লাসের কোড অনুযায়ী মূল পে-লোড প্রস্তুত
-            payload = {
-                "event": json.dumps(event_dict),
-                "links": links_str,
-                "linksPath": links_path,
-                "requestData": generate_security_token()
-            }
-
-            endpoint = BASE_URL + "admin/add_event"
-            post_res = requests.post(endpoint, json=payload, headers=get_headers(), timeout=15)
-            print(f"[{event_name}] Status: {post_res.status_code}, Response: {post_res.text}")
-
+        live_feed = raw_data if isinstance(raw_data, list) else raw_data.get("matches", raw_data.get("events", []))
     except Exception as e:
-        print("Sync failed:", str(e))
+        print("Feed load error:", e)
+        return
+
+    print(f"Total Manually Added Matches: {len(my_events)}")
+
+    # Shudhu apnar manually add kora match-er jonno link khujbe
+    for event in my_events:
+        event_name = str(event.get("eventName") or event.get("title") or event.get("name") or "").strip().lower()
+        links_path = event.get("links") or event.get("linksPath") or ""
+        event_id = event.get("id")
+
+        if not event_name:
+            continue
+
+        for item in live_feed:
+            feed_name = str(item.get("title") or item.get("name") or "").strip().lower()
+            raw_links = item.get("links", [])
+
+            # Name match korle ebong active streaming link thakle
+            if (feed_name in event_name or event_name in feed_name) and raw_links:
+                formatted_links = format_match_links(raw_links)
+                if not formatted_links:
+                    continue
+
+                links_str = json.dumps(formatted_links)
+
+                update_payload = {
+                    "links": links_str,
+                    "linksPath": links_path,
+                    "requestData": generate_security_token()
+                }
+                if event_id:
+                    update_payload["id"] = event_id
+
+                up_res = requests.post(
+                    BASE_URL + "admin/update_event",
+                    json=update_payload,
+                    headers=get_headers(),
+                    timeout=15
+                )
+                print(f"Updated: [{event_name}] | Status: {up_res.status_code} | Links Count: {len(formatted_links)}")
+                break
 
 if __name__ == "__main__":
-    sync_all_events()
+    sync_manual_events_only()
