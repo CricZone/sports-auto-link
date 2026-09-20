@@ -20,20 +20,18 @@ def get_headers():
         "User-Agent": "okhttp/4.9.2"
     }
 
-def clean_word(word):
-    """টিমের সাধারণ শব্দ বাদ দিয়ে মূল নাম বের করা"""
-    w = str(word).lower()
-    w = re.sub(r'\b(fc|cf|sc|united|city|club|women)\b', '', w)
-    return re.sub(r'[^a-zA-Z0-9]', '', w).strip()
+def clean_name(val):
+    if not val:
+        return ""
+    w = str(val).lower()
+    w = re.sub(r'\b(fc|cf|sc|united|city|club|women|vs|v)\b', '', w)
+    return re.sub(r'[^a-z0-9]', '', w).strip()
 
 def get_my_saved_events():
     token = generate_security_token()
-    payload = {
-        "from": "events",
-        "requestData": token
-    }
+    payload = {"from": "events", "requestData": token}
     try:
-        res = requests.post(BASE_URL + "admin/select", json=payload, headers=get_headers(), timeout=15)
+        res = requests.post(BASE_URL + "admin/select", json=payload, headers=get_headers(), timeout=20)
         if res.status_code == 200:
             data = res.json()
             if isinstance(data, list):
@@ -46,38 +44,34 @@ def get_my_saved_events():
 
 def format_links_data(raw_links):
     formatted = []
-    if not raw_links:
+    if not raw_links or not isinstance(raw_links, list):
         return formatted
 
-    if isinstance(raw_links, list):
-        for idx, item in enumerate(raw_links):
-            if isinstance(item, dict):
-                name = item.get("name") or item.get("title") or f"Server {idx + 1}"
-                url = item.get("url") or item.get("link") or item.get("stream_url") or ""
-                ua = item.get("user_agent") or item.get("headers", {}).get("User-Agent") or "Mozilla/5.0"
-                headers_dict = item.get("headers") or {"User-Agent": ua}
-            else:
-                name = f"Live Stream {idx + 1}"
-                url = str(item)
-                headers_dict = {"User-Agent": "Mozilla/5.0"}
+    for idx, item in enumerate(raw_links):
+        if isinstance(item, dict):
+            name = item.get("name") or item.get("title") or f"Server {idx + 1}"
+            url = item.get("url") or item.get("link") or item.get("stream_url") or ""
+            headers_dict = item.get("headers") or {"User-Agent": item.get("user_agent") or "Mozilla/5.0"}
+        else:
+            name = f"Live Stream {idx + 1}"
+            url = str(item)
+            headers_dict = {"User-Agent": "Mozilla/5.0"}
 
-            if url and str(url).startswith("http"):
-                formatted.append({
-                    "name": name,
-                    "url": url,
-                    "stream_url": url,
-                    "headers": headers_dict,
-                    "user_agent": "Mozilla/5.0",
-                    "type": "m3u8" if ".m3u8" in str(url).lower() else "stream"
-                })
+        if url and str(url).startswith("http"):
+            formatted.append({
+                "name": name,
+                "url": url,
+                "stream_url": url,
+                "headers": headers_dict,
+                "user_agent": "Mozilla/5.0",
+                "type": "m3u8" if ".m3u8" in str(url).lower() else "stream"
+            })
     return formatted
 
 def sync_manual_events():
     my_events = get_my_saved_events()
-    print(f"Total Manually Added Events in Panel: {len(my_events)}")
-
+    print(f"Total Manually Added Events: {len(my_events)}")
     if not my_events:
-        print("No events found in DB.")
         return
 
     try:
@@ -92,12 +86,26 @@ def sync_manual_events():
         print("Feed load error:", e)
         return
 
-    print(f"Total Matches in Online Feed: {len(live_feed)}")
+    print(f"Total Matches in Feed: {len(live_feed)}")
+
+    # ফিডের ম্যাচগুলো দ্রুত মেলাতে ইনডেক্স করা
+    valid_feed = []
+    for f in live_feed:
+        title = str(f.get("title") or f.get("name") or "")
+        links = f.get("links", [])
+        if title and links:
+            valid_feed.append({
+                "raw_title": title,
+                "clean_title": clean_name(title),
+                "links": links
+            })
+
+    updated_count = 0
 
     for item_db in my_events:
         event_id = item_db.get("id")
         links_path = str(item_db.get("linksPath") or item_db.get("links") or "")
-        
+
         ev_data = item_db
         if "event" in item_db and isinstance(item_db["event"], str):
             try:
@@ -105,38 +113,29 @@ def sync_manual_events():
             except:
                 pass
 
-        event_name = str(ev_data.get("eventName") or item_db.get("eventName") or "").strip()
-        team_a = str(ev_data.get("teamAName") or item_db.get("teamAName") or "").strip()
-        team_b = str(ev_data.get("teamBName") or item_db.get("teamBName") or "").strip()
+        t_a = clean_name(ev_data.get("teamAName") or item_db.get("teamAName"))
+        t_b = clean_name(ev_data.get("teamBName") or item_db.get("teamBName"))
+        ev_n = clean_name(ev_data.get("eventName") or item_db.get("eventName"))
 
-        core_a = clean_word(team_a)
-        core_b = clean_word(team_b)
-
-        matched_feed = None
-        for f in live_feed:
-            f_title = str(f.get("title") or f.get("name") or "").lower()
-            
-            # ফিডে দুই দলের নাম অথবা অন্তত মূল দলের নাম থাকলে ম্যাচ ধরবে
-            cond_a = core_a and len(core_a) >= 3 and core_a in f_title
-            cond_b = core_b and len(core_b) >= 3 and core_b in f_title
-            
-            if (cond_a and cond_b) or cond_a or cond_b:
-                matched_feed = f
+        matched_item = None
+        for vf in valid_feed:
+            c_title = vf["clean_title"]
+            # দলের নাম অথবা ইভেন্টের নামের মিল চেক
+            if (t_a and len(t_a) >= 3 and t_a in c_title) or (t_b and len(t_b) >= 3 and t_b in c_title):
+                matched_item = vf
+                break
+            elif ev_n and len(ev_n) >= 4 and ev_n in c_title:
+                matched_item = vf
                 break
 
-        if not matched_feed:
+        if not matched_item:
             continue
 
-        raw_links = matched_feed.get("links", [])
-        if not raw_links:
-            continue
-
-        formatted_links = format_links_data(raw_links)
+        formatted_links = format_links_data(matched_item["links"])
         if not formatted_links:
             continue
 
-        print(f"-> MATCHED: [{team_a} vs {team_b}] with Feed: [{matched_feed.get('title')}]")
-        links_data_str = json.dumps(formatted_links)
+        print(f"\nUPDATING -> ID: {event_id} | Matched With: {matched_item['raw_title']}")
 
         event_str = item_db["event"] if ("event" in item_db and isinstance(item_db["event"], str)) else json.dumps(ev_data)
         if not links_path:
@@ -146,18 +145,19 @@ def sync_manual_events():
             "id": str(event_id),
             "event": event_str,
             "linksPath": links_path,
-            "linksData": links_data_str,
+            "linksData": json.dumps(formatted_links),
             "requestData": generate_security_token()
         }
 
-        up_res = requests.post(
-            BASE_URL + "admin/update_event",
-            json=payload,
-            headers=get_headers(),
-            timeout=15
-        )
+        try:
+            up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=10)
+            print(f"Status: {up_res.status_code} | Server Msg: {up_res.text[:100]} | Links: {len(formatted_links)}")
+            if up_res.status_code == 200:
+                updated_count += 1
+        except Exception as err:
+            print("Update error:", err)
 
-        print(f"Update Result Status: {up_res.status_code} | Links Added: {len(formatted_links)}")
+    print(f"\nDone! Total Events Updated: {updated_count}")
 
 if __name__ == "__main__":
     sync_manual_events()
