@@ -24,6 +24,7 @@ def clean_name(val):
     if not val:
         return ""
     w = str(val).lower()
+    # সাধারণ ফুটবল/ক্রিকেট ট্যাগ বাদ দেওয়া
     w = re.sub(r'\b(fc|cf|sc|united|city|club|women|vs|v)\b', '', w)
     return re.sub(r'[^a-z0-9]', '', w).strip()
 
@@ -43,7 +44,6 @@ def get_my_saved_events():
     return []
 
 def format_links_data(streaming_links):
-    """ফিডের streaming_links থেকে linksData তৈরি করা"""
     formatted = []
     if not streaming_links or not isinstance(streaming_links, list):
         return formatted
@@ -55,7 +55,6 @@ def format_links_data(streaming_links):
         name = item.get("name") or f"Server {idx + 1}"
         url = item.get("link") or item.get("url") or ""
 
-        # যদি URL এর ভেতরেই |user-agent= থাকে তা হ্যান্ডেল করা
         ua = "Mozilla/5.0"
         if "|user-agent=" in url:
             parts = url.split("|user-agent=")
@@ -91,19 +90,17 @@ def sync_manual_events():
 
     print(f"Total Matches in Feed: {len(live_feed)}")
 
-    # ফিডের ম্যাচগুলো ইনডেক্সিং
+    # ফিডের ডেটা ইনডেক্সিং
     indexed_feed = []
     for f in live_feed:
         t_a = clean_name(f.get("teamAName") or f.get("teamA") or "")
         t_b = clean_name(f.get("teamBName") or f.get("teamB") or "")
-        e_n = clean_name(f.get("eventName") or "")
         links = f.get("streaming_links") or f.get("links") or []
 
         if links:
             indexed_feed.append({
                 "teamA": t_a,
                 "teamB": t_b,
-                "eventName": e_n,
                 "raw_teamA": f.get("teamAName") or f.get("teamA"),
                 "raw_teamB": f.get("teamBName") or f.get("teamB"),
                 "streaming_links": links
@@ -125,17 +122,17 @@ def sync_manual_events():
         my_a = clean_name(ev_data.get("teamAName") or item_db.get("teamAName"))
         my_b = clean_name(ev_data.get("teamBName") or item_db.get("teamBName"))
 
-        # যদি প্যানেলে দলের নাম ডামি থাকে তবে স্কিপ করবে
         if not my_a or my_a in ["teama", "livematch"]:
             continue
 
         matched_match = None
         for inf in indexed_feed:
-            # দুই দলের নামের সাথে মিল যাচাই
-            cond_a = my_a and len(my_a) >= 3 and (my_a in inf["teamA"] or inf["teamA"] in my_a)
-            cond_b = my_b and len(my_b) >= 3 and (my_b in inf["teamB"] or inf["teamB"] in my_b)
+            # নিখুঁত ম্যাচিং: দুই দলের নাম মিললে সেরা, না হলে বড় নামের নিখুঁত মিল
+            both_match = (my_a == inf["teamA"] and my_b == inf["teamB"]) or (my_a == inf["teamB"] and my_b == inf["teamA"])
+            single_strong_a = len(my_a) >= 5 and (my_a == inf["teamA"] or my_a == inf["teamB"])
+            single_strong_b = len(my_b) >= 5 and (my_b == inf["teamA"] or my_b == inf["teamB"])
 
-            if cond_a or cond_b:
+            if both_match or (single_strong_a and single_strong_b) or (single_strong_a and not inf["teamB"]):
                 matched_match = inf
                 break
 
@@ -153,7 +150,6 @@ def sync_manual_events():
         if not links_path:
             links_path = str(ev_data.get("links") or ev_data.get("linksPath") or "")
 
-        # Smali b0.smali এর মেথড X এর পে-লোড
         payload = {
             "id": str(event_id),
             "event": event_str,
@@ -165,15 +161,12 @@ def sync_manual_events():
         try:
             up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
             print(f"Server Status: {up_res.status_code} | Links Added: {len(formatted_links)}")
-            print(f"Server Response: {up_res.text[:100]}")
             if up_res.status_code == 200:
                 updated_count += 1
         except Exception as e:
             print("Update failed:", e)
 
-    print(f"\n==========================================")
-    print(f"SYNC COMPLETED! Total Matches Updated: {updated_count}")
-    print(f"==========================================")
+    print(f"\nALL SYNCED! Total Correctly Updated: {updated_count}")
 
 if __name__ == "__main__":
     sync_manual_events()
