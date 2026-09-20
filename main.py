@@ -60,8 +60,12 @@ def format_links_data(streaming_links):
             url = parts[0]
             ua = parts[1]
 
+        # ফিড থেকে ClearKey / DRM API কী সংগ্রহ
+        api_key = str(item.get("api") or item.get("drmKey") or item.get("key") or item.get("license") or "").strip()
+        token_api = str(item.get("tokenApi") or "").strip()
+
         if url.startswith("http"):
-            # অ্যাপ ঠিক এই 'link' ফিল্ডটিই খুঁজছে
+            is_mpd = ".mpd" in url.lower()
             formatted.append({
                 "name": name,
                 "link": url,
@@ -69,9 +73,11 @@ def format_links_data(streaming_links):
                 "stream_url": url,
                 "headers": {"User-Agent": ua},
                 "user_agent": ua,
-                "type": "mpd" if ".mpd" in url.lower() else "m3u8",
-                "tokenApi": "",
-                "api": ""
+                "type": "mpd" if is_mpd else "m3u8",
+                "api": api_key,
+                "tokenApi": token_api,
+                "key": api_key,
+                "drmKey": api_key
             })
     return formatted
 
