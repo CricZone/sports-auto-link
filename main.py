@@ -61,7 +61,6 @@ def format_links_data(streaming_links):
             ua = parts[1]
 
         if url.startswith("http"):
-            # অ্যাডমিন অ্যাপের স্ট্যান্ডার্ড লিঙ্ক অবজেক্ট ফরম্যাট
             formatted.append({
                 "name": name,
                 "url": url,
@@ -105,7 +104,8 @@ def sync_manual_events():
                 "streaming_links": links
             })
 
-    # শুধুমাত্র ফিওরেন্টিনা vs নাপোলি বা আপনার অ্যাড করা ম্যাচগুলোতে ট্রাই করা
+    updated_count = 0
+
     for item_db in my_events:
         event_id = item_db.get("id")
 
@@ -139,11 +139,7 @@ def sync_manual_events():
         if not formatted_links:
             continue
 
-        print(f"\nUPDATING -> ID: {event_id} | Panel: [{ev_data.get('teamAName')} vs {ev_data.get('teamBName')}]")
-
-        # linksPath সঠিকভাবে নির্ধারণ
         links_path = str(item_db.get("linksPath") or ev_data.get("linksPath") or ev_data.get("links") or f"links/{event_id}")
-
         event_str = item_db["event"] if ("event" in item_db and isinstance(item_db["event"], str)) else json.dumps(ev_data)
 
         payload = {
@@ -155,14 +151,14 @@ def sync_manual_events():
         }
 
         try:
-            up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=15)
-            print(f"Server Status: {up_res.status_code}")
-            print(f"Server Full Response: {up_res.text}")
+            up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
+            if up_res.status_code == 200:
+                print(f"Updated ID: {event_id} | {ev_data.get('teamAName')} vs {ev_data.get('teamBName')} | Links: {len(formatted_links)}")
+                updated_count += 1
         except Exception as e:
-            print("Update failed:", e)
-        
-        # প্রথম ম্যাচটির রেসপন্স দেখার জন্য ব্রেক
-        break
+            print(f"Error updating ID {event_id}:", e)
+
+    print(f"\nAll updates finished. Total updated matches: {updated_count}")
 
 if __name__ == "__main__":
     sync_manual_events()
