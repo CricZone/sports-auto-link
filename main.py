@@ -1,3 +1,5 @@
+import os
+import sys
 import base64
 from datetime import datetime
 import json
@@ -5,7 +7,7 @@ import re
 import requests
 
 BASE_URL = "https://dlsports.proapp.workers.dev/"
-FEED_SOURCE = "https://s1.noobon.top/axsx/streamx.php"
+FEED_SOURCE = os.getenv("SECRET_FEED_SOURCE", "")
 
 def generate_security_token():
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -60,7 +62,6 @@ def format_links_data(streaming_links):
             url = parts[0]
             ua = parts[1]
 
-        # ফিড থেকে ClearKey / DRM API কী সংগ্রহ
         api_key = str(item.get("api") or item.get("drmKey") or item.get("key") or item.get("license") or "").strip()
         token_api = str(item.get("tokenApi") or "").strip()
 
@@ -82,6 +83,10 @@ def format_links_data(streaming_links):
     return formatted
 
 def sync_manual_events():
+    if not FEED_SOURCE:
+        print("Error: SECRET_FEED_SOURCE environment variable is not configured.")
+        return
+
     my_events = get_my_saved_events()
     print(f"Total Events in Panel: {len(my_events)}")
     if not my_events:
