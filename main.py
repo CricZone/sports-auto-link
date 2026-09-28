@@ -1,13 +1,17 @@
 import os
 import sys
 import base64
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import json
 import re
 import requests
 
 BASE_URL = "https://dlsports.proapp.workers.dev/"
 FEED_SOURCE = os.getenv("SECRET_FEED_SOURCE", "")
+MAX_ADD_PER_RUN = 5  # প্রতি রানে সর্বোচ্চ ৫টি নতুন ইভেন্ট অ্যাড হবে
+
+# বাংলাদেশ টাইমজোন (UTC+6)
+BD_TZ = timezone(timedelta(hours=6))
 
 def generate_security_token():
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -28,6 +32,53 @@ def clean_name(val):
     w = str(val).lower()
     w = re.sub(r'\b(fc|cf|sc|united|city|club|women|vs|v)\b', '', w)
     return re.sub(r'[^a-z0-9]', '', w).strip()
+
+def parse_match_time(raw_val):
+    """ম্যাচের সময় পার্স করে বাংলাদেশ সময় অনুযায়ী datetime অবজেক্ট রিটার্ন করে"""
+    if not raw_val:
+        return None
+    try:
+        now_bd = datetime.now(BD_TZ)
+        val_str = str(raw_val).strip()
+
+        # যদি টাইমস্ট্যাম্প হয় (সেকেন্ড বা মিলিসেকেন্ড)
+        if val_str.isdigit() or (val_str.replace('.', '', 1).isdigit() and len(val_str) >= 10):
+            ts = float(val_str)
+            if ts > 1e11:
+                ts /= 1000
+            return datetime.fromtimestamp(ts, tz=BD_TZ)
+
+        # সাধারণ তারিখ ও সময়ের ফরম্যাটসমূহ
+        formats = [
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %I:%M %p",
+            "%Y-%m-%d %H:%M",
+            "%d-%m-%Y %H:%M:%S",
+            "%d-%m-%Y %I:%M %p",
+            "%d-%m-%Y %H:%M",
+            "%d/%m/%Y %H:%M:%S",
+            "%d/%m/%Y %I:%M %p",
+            "%d/%m/%Y %H:%M",
+            "%Y-%m-%d"
+        ]
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(val_str, fmt)
+                return dt.replace(tzinfo=BD_TZ)
+            except ValueError:
+                pass
+
+        # শুধুমাত্র সময় দেওয়া থাকলে আজকের তারিখ ধরে নেওয়া হয়
+        time_formats = ["%I:%M %p", "%H:%M"]
+        for t_fmt in time_formats:
+            try:
+                t_dt = datetime.strptime(val_str, t_fmt)
+                return now_bd.replace(hour=t_dt.hour, minute=t_dt.minute, second=0, microsecond=0)
+            except ValueError:
+                pass
+    except Exception:
+        pass
+    return None
 
 def get_my_saved_events():
     token = generate_security_token()
@@ -89,8 +140,6 @@ def sync_manual_events():
 
     my_events = get_my_saved_events()
     print(f"Total Events in Panel: {len(my_events)}")
-    if not my_events:
-        return
 
     try:
         res = requests.get(FEED_SOURCE, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
@@ -98,12 +147,103 @@ def sync_manual_events():
             print("Feed fetch failed:", res.status_code)
             return
         live_feed = res.json()
+        if isinstance(live_feed, dict):
+            live_feed = live_feed.get("matches") or live_feed.get("events") or live_feed.get("data") or []
     except Exception as e:
         print("Feed load error:", e)
         return
 
     print(f"Total Matches in Feed: {len(live_feed)}")
 
+    # বাংলাদেশ সময় অনুযায়ী আজকের শুরুর সময় (রাত ১২:০০ AM)
+    now_bd = datetime.now(BD_TZ)
+    today_start_bd = now_bd.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # প্যানেলের বিদ্যমান ম্যাচগুলোর তালিকা সংরক্ষণ (ডুপ্লিকেট চেক করার জন্য)
+    existing_teams = []
+    for item in my_events:
+        ev_data = item
+        if "event" in item and isinstance(item["event"], str):
+            try:
+                ev_data = json.loads(item["event"])
+            except Exception:
+                pass
+        t_a = clean_name(ev_data.get("teamAName") or item.get("teamAName"))
+        t_b = clean_name(ev_data.get("teamBName") or item.get("teamBName"))
+        if t_a and t_b:
+            existing_teams.append((t_a, t_b))
+
+    # ====================================================
+    # ১. নতুন ইভেন্ট অটো-অ্যাড (প্রতি রানে সর্বোচ্চ ৫টি)
+    # ====================================================
+    added_count = 0
+    for f in live_feed:
+        if added_count >= MAX_ADD_PER_RUN:
+            break
+
+        f_raw_a = f.get("teamAName") or f.get("teamA") or ""
+        f_raw_b = f.get("teamBName") or f.get("teamB") or ""
+        t_a = clean_name(f_raw_a)
+        t_b = clean_name(f_raw_b)
+
+        if not t_a or not t_b:
+            continue
+
+        # ম্যাচটি ইতিমধ্যে প্যানেলে আছে কিনা যাচাই
+        already_exists = any(
+            (t_a == ex[0] and t_b == ex[1]) or (t_a == ex[1] and t_b == ex[0])
+            for ex in existing_teams
+        )
+        if already_exists:
+            continue
+
+        # তারিখ চেক: আজকের রাত ১২:০০ AM-এর আগের ম্যাচ বাদ দেওয়া হবে
+        match_time_raw = f.get("time") or f.get("date") or f.get("start_time") or ""
+        match_dt = parse_match_time(match_time_raw)
+
+        if match_dt and match_dt < today_start_bd:
+            continue  # অতীতের ম্যাচ হলে স্কিপ
+
+        # নতুন ম্যাচ তৈরি করার পেলোড
+        links = f.get("streaming_links") or f.get("links") or []
+        formatted_links = format_links_data(links)
+        new_event_id = str(int(datetime.now().timestamp() * 1000) + added_count)
+
+        event_body = {
+            "teamAName": f_raw_a,
+            "teamBName": f_raw_b,
+            "teamAFlag": f.get("teamAFlag") or f.get("team1_logo") or f.get("logo1") or "",
+            "teamBFlag": f.get("teamBFlag") or f.get("team2_logo") or f.get("logo2") or "",
+            "matchTitle": f.get("name") or f.get("title") or f"{f_raw_a} vs {f_raw_b}",
+            "tournament": f.get("tournament") or f.get("league") or "Live Event",
+            "time": str(match_time_raw),
+            "date": match_dt.strftime("%Y-%m-%d") if match_dt else now_bd.strftime("%Y-%m-%d"),
+            "status": "upcoming"
+        }
+
+        payload = {
+            "id": new_event_id,
+            "event": json.dumps(event_body),
+            "linksPath": f"links/{new_event_id}",
+            "linksData": json.dumps(formatted_links),
+            "requestData": generate_security_token()
+        }
+
+        try:
+            # সার্ভারে নতুন ম্যাচ যুক্ত করার রিকোয়েস্ট
+            add_res = requests.post(BASE_URL + "admin/add_event", json=payload, headers=get_headers(), timeout=12)
+            if add_res.status_code == 200:
+                print(f"[Auto-Added] {f_raw_a} vs {f_raw_b} (Time: {match_time_raw})")
+                existing_teams.append((t_a, t_b))
+                added_count += 1
+        except Exception as e:
+            print(f"Error adding event {f_raw_a} vs {f_raw_b}:", e)
+
+    print(f"Total new events added in this run: {added_count}")
+
+    # ====================================================
+    # ২. বিদ্যমান ম্যাচগুলোর লাইভ লিংক আপডেট
+    # ====================================================
     indexed_feed = []
     for f in live_feed:
         t_a = clean_name(f.get("teamAName") or f.get("teamA") or "")
@@ -114,21 +254,20 @@ def sync_manual_events():
             indexed_feed.append({
                 "teamA": t_a,
                 "teamB": t_b,
-                "raw_teamA": f.get("teamAName") or f.get("teamA"),
-                "raw_teamB": f.get("teamBName") or f.get("teamB"),
                 "streaming_links": links
             })
 
     updated_count = 0
+    # নতুন ফেচ করা লিস্ট নিয়ে আপডেট চালানো
+    current_my_events = get_my_saved_events()
 
-    for item_db in my_events:
+    for item_db in current_my_events:
         event_id = item_db.get("id")
-
         ev_data = item_db
         if "event" in item_db and isinstance(item_db["event"], str):
             try:
                 ev_data = json.loads(item_db["event"])
-            except:
+            except Exception:
                 pass
 
         my_a = clean_name(ev_data.get("teamAName") or item_db.get("teamAName"))
@@ -143,7 +282,7 @@ def sync_manual_events():
             single_strong_a = len(my_a) >= 5 and (my_a == inf["teamA"] or my_a == inf["teamB"])
             single_strong_b = len(my_b) >= 5 and (my_b == inf["teamA"] or my_b == inf["teamB"])
 
-            if both_match or (single_strong_a and single_strong_b) or (single_strong_a and not inf["teamB"]):
+            if both_match or (single_strong_a and single_strong_b):
                 matched_match = inf
                 break
 
@@ -154,7 +293,7 @@ def sync_manual_events():
         if not formatted_links:
             continue
 
-        links_path = str(item_db.get("linksPath") or ev_data.get("linksPath") or ev_data.get("links") or f"links/{event_id}")
+        links_path = str(item_db.get("linksPath") or ev_data.get("linksPath") or f"links/{event_id}")
         event_str = item_db["event"] if ("event" in item_db and isinstance(item_db["event"], str)) else json.dumps(ev_data)
 
         payload = {
@@ -168,12 +307,12 @@ def sync_manual_events():
         try:
             up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
             if up_res.status_code == 200:
-                print(f"Updated ID: {event_id} | {ev_data.get('teamAName')} vs {ev_data.get('teamBName')} | Links: {len(formatted_links)}")
+                print(f"[Updated Links] ID: {event_id} | {ev_data.get('teamAName')} vs {ev_data.get('teamBName')} | Links: {len(formatted_links)}")
                 updated_count += 1
         except Exception as e:
             print(f"Error updating ID {event_id}:", e)
 
-    print(f"\nAll updates finished. Total updated matches: {updated_count}")
+    print(f"\nAll operations finished. Total Added: {added_count}, Total Updated: {updated_count}")
 
 if __name__ == "__main__":
     sync_manual_events()
