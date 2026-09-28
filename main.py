@@ -136,9 +136,12 @@ def sync_manual_events():
     my_events = get_my_saved_events()
     print(f"Total Events in Panel: {len(my_events)}")
 
-    # ডাটাবেসের ফিল্ড কনফার্ম করার জন্য নমুনা প্রিন্ট
-    if my_events and len(my_events) > 0:
-        print("Sample DB Event Keys:", list(my_events[0].keys()))
+    # ডাটাবেসের বর্তমান ধারাবাহিক ID এবং order_index বের করা
+    valid_ids = [int(item['id']) for item in my_events if str(item.get('id', '')).isdigit()]
+    max_id = max(valid_ids) if valid_ids else 1200
+
+    valid_orders = [int(item['order_index']) for item in my_events if str(item.get('order_index', '')).lstrip('-').isdigit()]
+    max_order = max(valid_orders) if valid_orders else 0
 
     try:
         res = requests.get(FEED_SOURCE, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
@@ -172,7 +175,7 @@ def sync_manual_events():
             existing_teams.append((t_a, t_b))
 
     # ====================================================
-    # ১. নতুন ইভেন্ট অটো-অ্যাড (পেলোড ফিক্স)
+    # ১. নতুন ইভেন্ট অটো-অ্যাড (ডাটাবেস স্কিমা অনুযায়ী)
     # ====================================================
     added_count = 0
     for f in live_feed:
@@ -209,13 +212,17 @@ def sync_manual_events():
 
         links = f.get("streaming_links") or f.get("links") or []
         formatted_links = format_links_data(links)
-        new_event_id = str(int(datetime.now().timestamp() * 1000) + added_count)
+
+        # ধারাবাহিক ID ও order_index তৈরি
+        new_event_id = str(max_id + 1 + added_count)
+        new_order_index = max_order + 1 + added_count
 
         category_name = f.get("category") or f.get("sport") or "Football"
         tournament_name = f.get("tournament") or f.get("league") or "Live Event"
         full_tournament = f"{category_name} || {tournament_name}" if "||" not in tournament_name else tournament_name
         match_title = f.get("name") or f.get("title") or f"{f_raw_a} vs {f_raw_b}"
 
+        # অ্যাপের ফরম্যাট অনুযায়ী তারিখ ও সময়
         date_str = match_dt.strftime("%d/%m/%Y") if match_dt else (raw_date or now_bd.strftime("%d/%m/%Y"))
         time_str = match_dt.strftime("%I:%M %p") if match_dt else (raw_time or "12:00 AM")
 
@@ -232,34 +239,22 @@ def sync_manual_events():
             "status": "upcoming"
         }
 
-        # সম্পূর্ণ ফ্ল্যাট এবং নেস্টেড সব প্রয়োজনীয় ফিল্ডসহ রিকোয়েস্ট তৈরি
+        # স্কিমার ৪টি আবশ্যক ফিল্ড সহ পেলোড
         payload = {
-            "requestData": generate_security_token(),
             "from": "events",
+            "requestData": generate_security_token(),
             "id": new_event_id,
-            "teamAName": f_raw_a,
-            "teamBName": f_raw_b,
-            "teamA": f_raw_a,
-            "teamB": f_raw_b,
-            "teamAFlag": event_body["teamAFlag"],
-            "teamBFlag": event_body["teamBFlag"],
-            "matchTitle": match_title,
-            "title": match_title,
-            "name": match_title,
-            "category": category_name,
-            "tournament": full_tournament,
-            "time": time_str,
-            "date": date_str,
-            "status": "upcoming",
+            "event": json.dumps(event_body),
+            "links": f"links/{new_event_id}",
+            "order_index": new_order_index,
             "linksPath": f"links/{new_event_id}",
-            "linksData": json.dumps(formatted_links),
-            "event": json.dumps(event_body)
+            "linksData": json.dumps(formatted_links)
         }
 
         try:
             add_res = requests.post(BASE_URL + "admin/add_event", json=payload, headers=get_headers(), timeout=12)
-            if add_res.status_code == 200 and add_res.json().get("success", False):
-                print(f"[Auto-Added Successfully] {f_raw_a} vs {f_raw_b}")
+            if add_res.status_code == 200:
+                print(f"[Auto-Added Successfully] ID: {new_event_id} | {f_raw_a} vs {f_raw_b}")
                 existing_teams.append((t_a, t_b))
                 added_count += 1
             else:
@@ -320,13 +315,14 @@ def sync_manual_events():
         if not formatted_links:
             continue
 
-        links_path = str(item_db.get("linksPath") or ev_data.get("linksPath") or f"links/{event_id}")
+        links_path = str(item_db.get("links") or item_db.get("linksPath") or f"links/{event_id}")
         event_str = item_db["event"] if ("event" in item_db and isinstance(item_db["event"], str)) else json.dumps(ev_data)
 
         payload = {
             "from": "events",
             "id": str(event_id),
             "event": event_str,
+            "links": links_path,
             "linksPath": links_path,
             "linksData": json.dumps(formatted_links),
             "requestData": generate_security_token()
