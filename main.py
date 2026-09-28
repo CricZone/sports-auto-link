@@ -34,20 +34,17 @@ def clean_name(val):
     return re.sub(r'[^a-z0-9]', '', w).strip()
 
 def parse_match_time(raw_val):
-    """ম্যাচের সময় পার্স করে বাংলাদেশ সময় অনুযায়ী datetime অবজেক্ট রিটার্ন করে"""
     if not raw_val:
         return None
     try:
         now_bd = datetime.now(BD_TZ)
         val_str = str(raw_val).strip()
 
-        # ISO ফরম্যাট হ্যান্ডলিং (যেমন: 2026-09-29T14:30:00Z)
         if "t" in val_str.lower():
             clean_iso = val_str.replace("Z", "+00:00").replace("z", "+00:00")
             dt = datetime.fromisoformat(clean_iso)
             return dt.astimezone(BD_TZ)
 
-        # যদি টাইমস্ট্যাম্প হয় (সেকেন্ড বা মিলিসেকেন্ড)
         if val_str.isdigit() or (val_str.replace('.', '', 1).isdigit() and len(val_str) >= 10):
             ts = float(val_str)
             if ts > 1e11:
@@ -55,18 +52,10 @@ def parse_match_time(raw_val):
             return datetime.fromtimestamp(ts, tz=BD_TZ)
 
         formats = [
-            "%Y-%m-%d %H:%M:%S",
-            "%Y-%m-%d %I:%M %p",
-            "%Y-%m-%d %H:%M",
-            "%d-%m-%Y %H:%M:%S",
-            "%d-%m-%Y %I:%M %p",
-            "%d-%m-%Y %H:%M",
-            "%d/%m/%Y %H:%M:%S",
-            "%d/%m/%Y %I:%M %p",
-            "%d/%m/%Y %H:%M",
-            "%Y-%m-%d",
-            "%d-%m-%Y",
-            "%d/%m/%Y"
+            "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %I:%M %p", "%Y-%m-%d %H:%M",
+            "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %I:%M %p", "%d-%m-%Y %H:%M",
+            "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %I:%M %p", "%d/%m/%Y %H:%M",
+            "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"
         ]
         for fmt in formats:
             try:
@@ -75,7 +64,6 @@ def parse_match_time(raw_val):
             except ValueError:
                 pass
 
-        # শুধুমাত্র সময় দেওয়া থাকলে আজকের দিন ধরে নেওয়া হয়
         time_formats = ["%I:%M %p", "%H:%M"]
         for t_fmt in time_formats:
             try:
@@ -162,11 +150,9 @@ def sync_manual_events():
 
     print(f"Total Matches in Feed: {len(live_feed)}")
 
-    # বাংলাদেশ সময় অনুযায়ী আজকের শুরুর সময় (রাত ১২:০০ AM)
     now_bd = datetime.now(BD_TZ)
     today_start_bd = now_bd.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # প্যানেলের বিদ্যমান ম্যাচগুলোর তালিকা
     existing_teams = []
     for item in my_events:
         ev_data = item
@@ -180,10 +166,29 @@ def sync_manual_events():
         if t_a and t_b:
             existing_teams.append((t_a, t_b))
 
+    # সম্ভাব্য এন্ডপয়েন্ট তালিকা
+    CANDIDATE_ENDPOINTS = [
+        "admin/add_event",
+        "admin/create_event",
+        "admin/save_event",
+        "admin/new_event",
+        "admin/addEvent",
+        "admin/createEvent",
+        "admin/saveEvent",
+        "admin/insert_event",
+        "admin/insertEvent",
+        "admin/add",
+        "admin/save",
+        "admin/create",
+        "admin/update_event"  # কিছু ব্যাকএন্ডে update_event নতুন রেকর্ডও ইনসার্ট করে
+    ]
+
+    working_endpoint = None
+    added_count = 0
+
     # ====================================================
     # ১. নতুন ইভেন্ট অটো-অ্যাড
     # ====================================================
-    added_count = 0
     for f in live_feed:
         if added_count >= MAX_ADD_PER_RUN:
             break
@@ -196,7 +201,6 @@ def sync_manual_events():
         if not t_a or not t_b:
             continue
 
-        # ম্যাচটি ইতিমধ্যে প্যানেলে আছে কিনা যাচাই
         already_exists = any(
             (t_a == ex[0] and t_b == ex[1]) or (t_a == ex[1] and t_b == ex[0])
             for ex in existing_teams
@@ -204,7 +208,6 @@ def sync_manual_events():
         if already_exists:
             continue
 
-        # তারিখ ও সময় একত্রিত করা
         raw_date = str(f.get("date") or "").strip()
         raw_time = str(f.get("time") or f.get("start_time") or "").strip()
         if raw_date and raw_time and raw_date not in raw_time:
@@ -214,9 +217,7 @@ def sync_manual_events():
 
         match_dt = parse_match_time(match_time_raw)
 
-        # অতীতের ম্যাচ হলে বাদ দেওয়া হবে
         if match_dt and match_dt < today_start_bd:
-            print(f"[Skipped - Past Match] {f_raw_a} vs {f_raw_b} (Time: {match_time_raw})")
             continue
 
         links = f.get("streaming_links") or f.get("links") or []
@@ -243,27 +244,38 @@ def sync_manual_events():
             "requestData": generate_security_token()
         }
 
-        # সার্ভারে পাঠানো (প্রথমে add_event, ব্যর্থ হলে insert_event)
-        try:
-            endpoints_to_try = ["admin/add_event", "admin/insert_event", "admin/insert"]
-            success = False
-
-            for ep in endpoints_to_try:
-                add_res = requests.post(BASE_URL + ep, json=payload, headers=get_headers(), timeout=12)
-                if add_res.status_code == 200:
-                    print(f"[Auto-Added] {f_raw_a} vs {f_raw_b} (Endpoint: {ep})")
+        # যদি সঠিক এন্ডপয়েন্ট ইতিমধ্যে পাওয়া গিয়ে থাকে
+        if working_endpoint:
+            try:
+                res = requests.post(BASE_URL + working_endpoint, json=payload, headers=get_headers(), timeout=12)
+                if res.status_code == 200:
+                    print(f"[Auto-Added] {f_raw_a} vs {f_raw_b}")
                     existing_teams.append((t_a, t_b))
                     added_count += 1
-                    success = True
+            except Exception as e:
+                print(f"Error adding {f_raw_a} vs {f_raw_b}:", e)
+            continue
+
+        # প্রথম ম্যাচের ক্ষেত্রে এন্ডপয়েন্ট টেস্ট করা হবে
+        print(f"\n--- Testing Endpoints for: {f_raw_a} vs {f_raw_b} ---")
+        for ep in CANDIDATE_ENDPOINTS:
+            try:
+                test_res = requests.post(BASE_URL + ep, json=payload, headers=get_headers(), timeout=8)
+                print(f"-> Testing '{ep}': HTTP {test_res.status_code} | Text: {test_res.text[:60]}")
+                if test_res.status_code == 200:
+                    working_endpoint = ep
+                    print(f"===> MATCH FOUND! Working endpoint is: {ep} <===\n")
+                    existing_teams.append((t_a, t_b))
+                    added_count += 1
                     break
+            except Exception as e:
+                print(f"-> Testing '{ep}': Failed with error {e}")
 
-            if not success:
-                print(f"[Add Failed] {f_raw_a} vs {f_raw_b} | HTTP Status: {add_res.status_code} | Res: {add_res.text[:120]}")
+        if not working_endpoint:
+            print("Warning: None of the candidate endpoints worked on this server.")
+            break
 
-        except Exception as e:
-            print(f"Error adding event {f_raw_a} vs {f_raw_b}:", e)
-
-    print(f"Total new events added in this run: {added_count}")
+    print(f"\nTotal new events added in this run: {added_count}")
 
     # ====================================================
     # ২. বিদ্যমান ম্যাচগুলোর লাইভ লিংক আপডেট
