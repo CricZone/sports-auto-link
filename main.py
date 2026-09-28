@@ -150,6 +150,7 @@ def sync_manual_events():
 
     print(f"Total Matches in Feed: {len(live_feed)}")
 
+    # বাংলাদেশ সময় অনুযায়ী আজকের শুরুর সময় (রাত ১২:০০ AM)
     now_bd = datetime.now(BD_TZ)
     today_start_bd = now_bd.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -166,29 +167,10 @@ def sync_manual_events():
         if t_a and t_b:
             existing_teams.append((t_a, t_b))
 
-    # সম্ভাব্য এন্ডপয়েন্ট তালিকা
-    CANDIDATE_ENDPOINTS = [
-        "admin/add_event",
-        "admin/create_event",
-        "admin/save_event",
-        "admin/new_event",
-        "admin/addEvent",
-        "admin/createEvent",
-        "admin/saveEvent",
-        "admin/insert_event",
-        "admin/insertEvent",
-        "admin/add",
-        "admin/save",
-        "admin/create",
-        "admin/update_event"  # কিছু ব্যাকএন্ডে update_event নতুন রেকর্ডও ইনসার্ট করে
-    ]
-
-    working_endpoint = None
+    # ====================================================
+    # ১. নতুন ইভেন্ট অটো-অ্যাড (সর্বোচ্চ ৫টি)
+    # ====================================================
     added_count = 0
-
-    # ====================================================
-    # ১. নতুন ইভেন্ট অটো-অ্যাড
-    # ====================================================
     for f in live_feed:
         if added_count >= MAX_ADD_PER_RUN:
             break
@@ -217,6 +199,7 @@ def sync_manual_events():
 
         match_dt = parse_match_time(match_time_raw)
 
+        # অতীতের ম্যাচ হলে বাদ দেওয়া হবে
         if match_dt and match_dt < today_start_bd:
             continue
 
@@ -244,38 +227,16 @@ def sync_manual_events():
             "requestData": generate_security_token()
         }
 
-        # যদি সঠিক এন্ডপয়েন্ট ইতিমধ্যে পাওয়া গিয়ে থাকে
-        if working_endpoint:
-            try:
-                res = requests.post(BASE_URL + working_endpoint, json=payload, headers=get_headers(), timeout=12)
-                if res.status_code == 200:
-                    print(f"[Auto-Added] {f_raw_a} vs {f_raw_b}")
-                    existing_teams.append((t_a, t_b))
-                    added_count += 1
-            except Exception as e:
-                print(f"Error adding {f_raw_a} vs {f_raw_b}:", e)
-            continue
+        try:
+            add_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
+            if add_res.status_code == 200:
+                print(f"[Auto-Added] {f_raw_a} vs {f_raw_b}")
+                existing_teams.append((t_a, t_b))
+                added_count += 1
+        except Exception as e:
+            print(f"Error adding {f_raw_a} vs {f_raw_b}:", e)
 
-        # প্রথম ম্যাচের ক্ষেত্রে এন্ডপয়েন্ট টেস্ট করা হবে
-        print(f"\n--- Testing Endpoints for: {f_raw_a} vs {f_raw_b} ---")
-        for ep in CANDIDATE_ENDPOINTS:
-            try:
-                test_res = requests.post(BASE_URL + ep, json=payload, headers=get_headers(), timeout=8)
-                print(f"-> Testing '{ep}': HTTP {test_res.status_code} | Text: {test_res.text[:60]}")
-                if test_res.status_code == 200:
-                    working_endpoint = ep
-                    print(f"===> MATCH FOUND! Working endpoint is: {ep} <===\n")
-                    existing_teams.append((t_a, t_b))
-                    added_count += 1
-                    break
-            except Exception as e:
-                print(f"-> Testing '{ep}': Failed with error {e}")
-
-        if not working_endpoint:
-            print("Warning: None of the candidate endpoints worked on this server.")
-            break
-
-    print(f"\nTotal new events added in this run: {added_count}")
+    print(f"Total new events added in this run: {added_count}")
 
     # ====================================================
     # ২. বিদ্যমান ম্যাচগুলোর লাইভ লিংক আপডেট
