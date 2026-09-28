@@ -168,7 +168,7 @@ def sync_manual_events():
             existing_teams.append((t_a, t_b))
 
     # ====================================================
-    # ১. নতুন ইভেন্ট অটো-অ্যাড (সর্বোচ্চ ৫টি)
+    # ১. নতুন ইভেন্ট অটো-অ্যাড (admin/add_event ফিক্স)
     # ====================================================
     added_count = 0
     for f in live_feed:
@@ -199,7 +199,7 @@ def sync_manual_events():
 
         match_dt = parse_match_time(match_time_raw)
 
-        # অতীতের ম্যাচ হলে বাদ দেওয়া হবে
+        # অতীতের ম্যাচ হলে বাদ
         if match_dt and match_dt < today_start_bd:
             continue
 
@@ -207,19 +207,25 @@ def sync_manual_events():
         formatted_links = format_links_data(links)
         new_event_id = str(int(datetime.now().timestamp() * 1000) + added_count)
 
+        category_name = f.get("category") or f.get("sport") or "Football"
+        tournament_name = f.get("tournament") or f.get("league") or "Live Event"
+
         event_body = {
             "teamAName": f_raw_a,
             "teamBName": f_raw_b,
             "teamAFlag": f.get("teamAFlag") or f.get("team1_logo") or f.get("logo1") or "",
             "teamBFlag": f.get("teamBFlag") or f.get("team2_logo") or f.get("logo2") or "",
             "matchTitle": f.get("name") or f.get("title") or f"{f_raw_a} vs {f_raw_b}",
-            "tournament": f.get("tournament") or f.get("league") or "Live Event",
+            "tournament": f"{category_name} || {tournament_name}" if "||" not in tournament_name else tournament_name,
+            "category": category_name,
             "time": str(raw_time or match_time_raw),
             "date": match_dt.strftime("%Y-%m-%d") if match_dt else (raw_date or now_bd.strftime("%Y-%m-%d")),
             "status": "upcoming"
         }
 
+        # এখানে 'from': 'events' যোগ করা হয়েছে যাতে সার্ভার 400 এরর না দেয়
         payload = {
+            "from": "events",
             "id": new_event_id,
             "event": json.dumps(event_body),
             "linksPath": f"links/{new_event_id}",
@@ -228,11 +234,13 @@ def sync_manual_events():
         }
 
         try:
-            add_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
+            add_res = requests.post(BASE_URL + "admin/add_event", json=payload, headers=get_headers(), timeout=12)
             if add_res.status_code == 200:
-                print(f"[Auto-Added] {f_raw_a} vs {f_raw_b}")
+                print(f"[Auto-Added Successfully] {f_raw_a} vs {f_raw_b}")
                 existing_teams.append((t_a, t_b))
                 added_count += 1
+            else:
+                print(f"[Add Failed] Status: {add_res.status_code} | Msg: {add_res.text}")
         except Exception as e:
             print(f"Error adding {f_raw_a} vs {f_raw_b}:", e)
 
@@ -293,6 +301,7 @@ def sync_manual_events():
         event_str = item_db["event"] if ("event" in item_db and isinstance(item_db["event"], str)) else json.dumps(ev_data)
 
         payload = {
+            "from": "events",
             "id": str(event_id),
             "event": event_str,
             "linksPath": links_path,
