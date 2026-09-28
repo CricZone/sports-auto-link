@@ -4,6 +4,7 @@ import base64
 from datetime import datetime, timezone, timedelta
 import json
 import re
+import time
 import requests
 
 BASE_URL = "https://dlsports.proapp.workers.dev/"
@@ -64,7 +65,7 @@ def parse_match_time(raw_val):
             except ValueError:
                 pass
 
-        time_formats = ["%I:%M %p", "%H:%M"]
+        time_formats = ["%I:%M %p", "%H:%M", "%I:%M%p"]
         for t_fmt in time_formats:
             try:
                 t_dt = datetime.strptime(val_str, t_fmt)
@@ -136,7 +137,16 @@ def sync_manual_events():
     my_events = get_my_saved_events()
     print(f"Total Events in Panel: {len(my_events)}")
 
-    # ডাটাবেসের বর্তমান ধারাবাহিক ID এবং order_index বের করা
+    # ১. অ্যাপে বর্তমানে প্রদর্শিত ১টি ম্যাচের আসল স্ট্রাকচার প্রিন্ট
+    for item in my_events:
+        ev_str = str(item.get("event", ""))
+        if "Brazil" in ev_str or "Chicago" in ev_str or "Russia" in ev_str:
+            print("\n================ WORKING APP EVENT SAMPLE ================")
+            print("DB Item Keys:", list(item.keys()))
+            print("Event Data:", ev_str)
+            print("==========================================================\n")
+            break
+
     valid_ids = [int(item['id']) for item in my_events if str(item.get('id', '')).isdigit()]
     max_id = max(valid_ids) if valid_ids else 1200
 
@@ -157,7 +167,6 @@ def sync_manual_events():
 
     print(f"Total Matches in Feed: {len(live_feed)}")
 
-    # বাংলাদেশ সময় অনুযায়ী আজকের শুরুর সময় (রাত ১২:০০ AM)
     now_bd = datetime.now(BD_TZ)
     today_start_bd = now_bd.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -175,7 +184,7 @@ def sync_manual_events():
             existing_teams.append((t_a, t_b))
 
     # ====================================================
-    # ১. নতুন ইভেন্ট অটো-অ্যাড (ডাটাবেস স্কিমা অনুযায়ী)
+    # নতুন ইভেন্ট অটো-অ্যাড (অ্যাপের স্কিমা ফিক্স)
     # ====================================================
     added_count = 0
     for f in live_feed:
@@ -206,23 +215,29 @@ def sync_manual_events():
 
         match_dt = parse_match_time(match_time_raw)
 
-        # অতীতের ম্যাচ হলে বাদ
+        # অতীতের ম্যাচ বাদ
         if match_dt and match_dt < today_start_bd:
             continue
 
         links = f.get("streaming_links") or f.get("links") or []
         formatted_links = format_links_data(links)
 
-        # ধারাবাহিক ID ও order_index তৈরি
         new_event_id = str(max_id + 1 + added_count)
         new_order_index = max_order + 1 + added_count
 
-        category_name = f.get("category") or f.get("sport") or "Football"
-        tournament_name = f.get("tournament") or f.get("league") or "Live Event"
+        # ক্যাটাগরি ও টুর্নামেন্ট অ্যাপের সাথে শতভাগ ম্যাচ করা
+        raw_cat = str(f.get("category") or f.get("sport") or "").lower()
+        if "motor" in raw_cat or "racing" in raw_cat or "f1" in raw_cat:
+            category_name = "Motorsports"
+        elif "american" in raw_cat or "nfl" in raw_cat:
+            category_name = "American football"
+        else:
+            category_name = "Football"
+
+        tournament_name = f.get("tournament") or f.get("league") or "International Friendly Games"
         full_tournament = f"{category_name} || {tournament_name}" if "||" not in tournament_name else tournament_name
         match_title = f.get("name") or f.get("title") or f"{f_raw_a} vs {f_raw_b}"
 
-        # অ্যাপের ফরম্যাট অনুযায়ী তারিখ ও সময়
         date_str = match_dt.strftime("%d/%m/%Y") if match_dt else (raw_date or now_bd.strftime("%d/%m/%Y"))
         time_str = match_dt.strftime("%I:%M %p") if match_dt else (raw_time or "12:00 AM")
 
@@ -236,10 +251,11 @@ def sync_manual_events():
             "category": category_name,
             "time": time_str,
             "date": date_str,
-            "status": "upcoming"
+            "status": "Upcoming",
+            "is_hidden": 0,
+            "hidden": 0
         }
 
-        # স্কিমার ৪টি আবশ্যক ফিল্ড সহ পেলোড
         payload = {
             "from": "events",
             "requestData": generate_security_token(),
@@ -257,6 +273,7 @@ def sync_manual_events():
                 print(f"[Auto-Added Successfully] ID: {new_event_id} | {f_raw_a} vs {f_raw_b}")
                 existing_teams.append((t_a, t_b))
                 added_count += 1
+                time.sleep(3)
             else:
                 print(f"[Add Failed] Status: {add_res.status_code} | Msg: {add_res.text[:120]}")
         except Exception as e:
@@ -265,7 +282,7 @@ def sync_manual_events():
     print(f"Total new events added in this run: {added_count}")
 
     # ====================================================
-    # ২. বিদ্যমান ম্যাচগুলোর লাইভ লিংক আপডেট
+    # বিদ্যমান ম্যাচগুলোর লাইভ লিংক আপডেট
     # ====================================================
     indexed_feed = []
     for f in live_feed:
