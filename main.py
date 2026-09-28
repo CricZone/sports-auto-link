@@ -136,6 +136,10 @@ def sync_manual_events():
     my_events = get_my_saved_events()
     print(f"Total Events in Panel: {len(my_events)}")
 
+    # ডাটাবেসের ফিল্ড কনফার্ম করার জন্য নমুনা প্রিন্ট
+    if my_events and len(my_events) > 0:
+        print("Sample DB Event Keys:", list(my_events[0].keys()))
+
     try:
         res = requests.get(FEED_SOURCE, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
         if res.status_code != 200:
@@ -168,7 +172,7 @@ def sync_manual_events():
             existing_teams.append((t_a, t_b))
 
     # ====================================================
-    # ১. নতুন ইভেন্ট অটো-অ্যাড (admin/add_event ফিক্স)
+    # ১. নতুন ইভেন্ট অটো-অ্যাড (পেলোড ফিক্স)
     # ====================================================
     added_count = 0
     for f in live_feed:
@@ -209,38 +213,57 @@ def sync_manual_events():
 
         category_name = f.get("category") or f.get("sport") or "Football"
         tournament_name = f.get("tournament") or f.get("league") or "Live Event"
+        full_tournament = f"{category_name} || {tournament_name}" if "||" not in tournament_name else tournament_name
+        match_title = f.get("name") or f.get("title") or f"{f_raw_a} vs {f_raw_b}"
+
+        date_str = match_dt.strftime("%d/%m/%Y") if match_dt else (raw_date or now_bd.strftime("%d/%m/%Y"))
+        time_str = match_dt.strftime("%I:%M %p") if match_dt else (raw_time or "12:00 AM")
 
         event_body = {
             "teamAName": f_raw_a,
             "teamBName": f_raw_b,
             "teamAFlag": f.get("teamAFlag") or f.get("team1_logo") or f.get("logo1") or "",
             "teamBFlag": f.get("teamBFlag") or f.get("team2_logo") or f.get("logo2") or "",
-            "matchTitle": f.get("name") or f.get("title") or f"{f_raw_a} vs {f_raw_b}",
-            "tournament": f"{category_name} || {tournament_name}" if "||" not in tournament_name else tournament_name,
+            "matchTitle": match_title,
+            "tournament": full_tournament,
             "category": category_name,
-            "time": str(raw_time or match_time_raw),
-            "date": match_dt.strftime("%Y-%m-%d") if match_dt else (raw_date or now_bd.strftime("%Y-%m-%d")),
+            "time": time_str,
+            "date": date_str,
             "status": "upcoming"
         }
 
-        # এখানে 'from': 'events' যোগ করা হয়েছে যাতে সার্ভার 400 এরর না দেয়
+        # সম্পূর্ণ ফ্ল্যাট এবং নেস্টেড সব প্রয়োজনীয় ফিল্ডসহ রিকোয়েস্ট তৈরি
         payload = {
+            "requestData": generate_security_token(),
             "from": "events",
             "id": new_event_id,
-            "event": json.dumps(event_body),
+            "teamAName": f_raw_a,
+            "teamBName": f_raw_b,
+            "teamA": f_raw_a,
+            "teamB": f_raw_b,
+            "teamAFlag": event_body["teamAFlag"],
+            "teamBFlag": event_body["teamBFlag"],
+            "matchTitle": match_title,
+            "title": match_title,
+            "name": match_title,
+            "category": category_name,
+            "tournament": full_tournament,
+            "time": time_str,
+            "date": date_str,
+            "status": "upcoming",
             "linksPath": f"links/{new_event_id}",
             "linksData": json.dumps(formatted_links),
-            "requestData": generate_security_token()
+            "event": json.dumps(event_body)
         }
 
         try:
             add_res = requests.post(BASE_URL + "admin/add_event", json=payload, headers=get_headers(), timeout=12)
-            if add_res.status_code == 200:
+            if add_res.status_code == 200 and add_res.json().get("success", False):
                 print(f"[Auto-Added Successfully] {f_raw_a} vs {f_raw_b}")
                 existing_teams.append((t_a, t_b))
                 added_count += 1
             else:
-                print(f"[Add Failed] Status: {add_res.status_code} | Msg: {add_res.text}")
+                print(f"[Add Failed] Status: {add_res.status_code} | Msg: {add_res.text[:120]}")
         except Exception as e:
             print(f"Error adding {f_raw_a} vs {f_raw_b}:", e)
 
