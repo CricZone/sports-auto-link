@@ -13,10 +13,10 @@ FEED_SOURCE = os.getenv("SECRET_FEED_SOURCE", "")
 # বাংলাদেশ টাইমজোন (UTC+6)
 BD_TZ = timezone(timedelta(hours=6))
 
-# প্রতি রানে নতুন আপকামিং ম্যাচ অ্যাড সীমা (আস্তে আস্তে অ্যাড হওয়ার জন্য)
-MAX_UPCOMING_ADD_PER_RUN = 6
+# আপকামিং ম্যাচ আস্তে আস্তে অ্যাড হওয়ার সীমা
+MAX_UPCOMING_ADD_PER_RUN = 5
 
-# Finished ট্যাবে সবসময় সাম্প্রতিক ১২টি (১০-১২ এর মধ্যে) সমাপ্ত ম্যাচ থাকবে
+# Finished ট্যাবে সবসময় সাম্প্রতিক ১২টি সমাপ্ত ম্যাচ সংরক্ষিত থাকবে
 KEEP_FINISHED_LIMIT = 12
 
 def generate_security_token():
@@ -81,7 +81,7 @@ def parse_feed_time_to_bd(date_str, time_str):
     except Exception:
         return datetime.now(timezone.utc), now_bd
 
-# ডাটাবেসে সেভ থাকা বাংলাদেশ সময় রিড করার ফাংশন
+# ডাটাবেসে সেভ থাকা সময় পার্স করার ফাংশন
 def parse_saved_bd_dt(date_str, time_str):
     if not date_str:
         return None
@@ -166,7 +166,7 @@ def remove_duplicate_events_step(my_events):
                 if del_res.status_code in [200, 201]:
                     deleted_dup += 1
                     print(f"[Duplicate Removed] ID: {event_id} | {t_a} vs {t_b}")
-                    time.sleep(1.0)
+                    time.sleep(0.8)
             except Exception as e:
                 print(f"Error removing duplicate {event_id}:", e)
         else:
@@ -174,7 +174,7 @@ def remove_duplicate_events_step(my_events):
 
     return deleted_dup
 
-# ২. Finished ট্যাবে ১০-১২টি সমাপ্ত ম্যাচ রেখে পুরোনো ম্যাচ ডিলিট করা
+# ২. Finished ট্যাবে ১০-১২টি সমাপ্ত ম্যাচ রেখে অতিরিক্তগুলো মুছে ফেলা
 def manage_finished_events_step(my_events):
     now_bd = datetime.now(BD_TZ)
     finished_list = []
@@ -209,41 +209,17 @@ def manage_finished_events_step(my_events):
         else:
             end_dt = match_dt + timedelta(minutes=duration_min)
 
-        # খেলা শেষ হয়ে থাকলে
         if end_dt < now_bd:
             finished_list.append({
                 "id": event_id,
                 "end_dt": end_dt,
-                "item_db": item_db,
-                "ev_data": ev_data,
                 "t_a": ev_data.get("teamAName") or item_db.get("teamAName") or "Event",
                 "t_b": ev_data.get("teamBName") or item_db.get("teamBName") or ""
             })
 
-    # শেষ হওয়া ম্যাচগুলোকে নতুন থেকে পুরোনোর ক্রমানুসারে সাজানো
     finished_list.sort(key=lambda x: x["end_dt"], reverse=True)
 
-    # সাম্প্রতিক ১২টি ম্যাচ Finished ট্যাবে রাখা নিশ্চিত করা
-    kept_finished = finished_list[:KEEP_FINISHED_LIMIT]
-    for f_item in kept_finished:
-        ev = f_item["ev_data"]
-        # স্ট্যাটাস Finished হিসেবে আপডেট না থাকলে আপডেট করা
-        if ev.get("matchStatus") != "finished" or ev.get("status") != "finished":
-            ev["matchStatus"] = "finished"
-            ev["status"] = "finished"
-            up_payload = {
-                "id": str(f_item["id"]),
-                "event": json.dumps(ev),
-                "matchStatus": "finished",
-                "status": "finished",
-                "requestData": generate_security_token()
-            }
-            try:
-                requests.post(BASE_URL + "admin/update_event", json=up_payload, headers=get_headers(), timeout=10)
-            except Exception:
-                pass
-
-    # ১২টির বেশি পুরোনো ম্যাচগুলো ডাটাবেস থেকে ডিলিট
+    # ১২টির বেশি পুরোনো ম্যাচগুলো ডিলিট
     to_delete = finished_list[KEEP_FINISHED_LIMIT:]
     deleted_count = 0
 
@@ -257,7 +233,7 @@ def manage_finished_events_step(my_events):
             if del_res.status_code in [200, 201]:
                 deleted_count += 1
                 print(f"[Auto Deleted Old Finished] ID: {item['id']} | {item['t_a']} vs {item['t_b']}")
-                time.sleep(1.0)
+                time.sleep(0.8)
         except Exception as e:
             print(f"Error deleting event {item['id']}:", e)
 
@@ -301,7 +277,7 @@ def format_links_data(streaming_links):
             })
     return formatted
 
-# ৩. লাইভ ম্যাচ আগে অ্যাড করা এবং এরপর আস্তে আস্তে আপকামিং ম্যাচ যোগ করা
+# ৩. লাইভ ম্যাচ আগে এবং এরপর আপকামিং ম্যাচ ক্রমান্বয়ে অ্যাড করা
 def add_events_step(live_feed, my_events):
     now_bd = datetime.now(BD_TZ)
 
@@ -341,7 +317,6 @@ def add_events_step(live_feed, my_events):
         if not clean_fa and not clean_ftitle:
             continue
 
-        # ডাটাবেসে ইতিমধ্যে আছে কি না চেক
         already_exists = False
         for item_db in my_events:
             ev_data = item_db
@@ -367,22 +342,18 @@ def add_events_step(live_feed, my_events):
 
         item_tuple = (feed_match, match_bd_dt, match_end_bd, duration_min, t_a_raw, t_b_raw, f_title)
 
-        # ১. ম্যাচটি কি এই মুহূর্তে লাইভ?
+        # ১. এই মুহূর্তে লাইভ চলছে এমন খেলা
         if match_bd_dt <= now_bd <= match_end_bd:
             live_candidates.append(item_tuple)
-        # ২. ম্যাচটি কি ভবিষ্যতে শুরু হবে (আসন্ন)?
+        # ২. ভবিষ্যতে শুরু হবে এমন খেলা
         elif match_bd_dt > now_bd:
             upcoming_candidates.append(item_tuple)
 
-    # আপকামিং ম্যাচগুলোকে শুরুর সময় অনুসারে সাজানো (সবচেয়ে কাছের খেলা আগে)
     upcoming_candidates.sort(key=lambda x: x[1])
 
-    # প্রথমে সমস্ত লাইভ ম্যাচ অগ্রাধিকার ভিত্তিতে যোগ করা হবে
     to_add_list = []
-    to_add_list.extend(live_candidates)
-
-    # এরপর আপকামিং ম্যাচ ধাপে ধাপে যোগ করা হবে
-    to_add_list.extend(upcoming_candidates[:MAX_UPCOMING_ADD_PER_RUN])
+    to_add_list.extend(live_candidates)  # সব চলমান লাইভ ম্যাচ আগে অ্যাড হবে
+    to_add_list.extend(upcoming_candidates[:MAX_UPCOMING_ADD_PER_RUN])  # এরপর ৫টি আপকামিং ম্যাচ
 
     added_count = 0
 
@@ -397,18 +368,10 @@ def add_events_step(live_feed, my_events):
 
         unique_slug = f"links/{int(time.time() * 1000)}_{added_count}"
 
-        # স্ট্যাটাস নির্ধারণ
-        if match_bd_dt <= now_bd <= match_end_bd:
-            status_val = "live"
-        elif now_bd > match_end_bd:
-            status_val = "finished"
-        else:
-            status_val = "upcoming"
-
-        # ১২ ঘণ্টার স্পষ্ট AM/PM সময় ফরম্যাট
-        bd_time_str = match_bd_dt.strftime("%I:%M %p")
+        # স্ট্যান্ডার্ড ২৪ ঘণ্টার HH:mm:ss ফরম্যাট (অ্যাপ কোনোভাবেই ক্র্যাশ করবে না)
+        bd_time_str = match_bd_dt.strftime("%H:%M:%S")
         bd_date_str = match_bd_dt.strftime("%d/%m/%Y")
-        bd_end_time_str = match_end_bd.strftime("%I:%M %p")
+        bd_end_time_str = match_end_bd.strftime("%H:%M:%S")
         bd_end_date_str = match_end_bd.strftime("%d/%m/%Y")
 
         new_event_dict = {
@@ -430,8 +393,6 @@ def add_events_step(live_feed, my_events):
             "messages": "{}",
             "end_date": bd_end_date_str,
             "end_time": bd_end_time_str,
-            "matchStatus": status_val,
-            "status": status_val,
             "links": unique_slug
         }
 
@@ -439,16 +400,6 @@ def add_events_step(live_feed, my_events):
 
         insert_payload = {
             "event": json.dumps(new_event_dict),
-            "date": bd_date_str,
-            "time": bd_time_str,
-            "end_date": bd_end_date_str,
-            "end_time": bd_end_time_str,
-            "matchStatus": status_val,
-            "status": status_val,
-            "category": category,
-            "teamAName": t_a_raw,
-            "teamBName": t_b_raw,
-            "eventName": f_title,
             "links": links_json_str,
             "linksData": links_json_str,
             "linksPath": unique_slug,
@@ -462,11 +413,11 @@ def add_events_step(live_feed, my_events):
                 in_res = requests.post(BASE_URL + "admin/add_event", json=insert_payload, headers=get_headers(), timeout=15)
                 if in_res.status_code in [200, 201]:
                     added_count += 1
-                    lbl = "🔴 LIVE" if status_val == "live" else "UPCOMING"
+                    lbl = "🔴 LIVE" if match_bd_dt <= now_bd <= match_end_bd else "UPCOMING"
                     print(f"[{lbl} Added {added_count}] {t_a_raw} vs {t_b_raw} | Time: {bd_date_str} {bd_time_str}")
                     my_events.append(new_event_dict)
                     success = True
-                    time.sleep(2.0)
+                    time.sleep(1.8)
                     break
                 else:
                     time.sleep(1.5)
@@ -475,7 +426,7 @@ def add_events_step(live_feed, my_events):
 
     return added_count
 
-# ৪. ডাটাবেসে থাকা আগের সব ম্যাচের সময় ও লিঙ্ক সিঙ্ক করা
+# ৪. ডাটাবেসে সেভ থাকা আগের ম্যাচগুলোর সময় ও লিঙ্ক সিঙ্ক (ক্র্যাশ দূরীকরণ)
 def sync_streaming_links_and_force_bd_time(live_feed, my_events):
     now_bd = datetime.now(BD_TZ)
     indexed_feed = []
@@ -539,25 +490,16 @@ def sync_streaming_links_and_force_bd_time(live_feed, my_events):
 
         end_bd_dt = correct_bd_dt + timedelta(minutes=duration_min)
 
-        # রিয়েল-টাইম স্ট্যাটাস
-        if correct_bd_dt <= now_bd <= end_bd_dt:
-            current_status = "live"
-        elif now_bd > end_bd_dt:
-            current_status = "finished"
-        else:
-            current_status = "upcoming"
-
-        correct_time_str = correct_bd_dt.strftime("%I:%M %p")
+        # অ্যাপের ক্র্যাশ ফিক্স করতে স্ট্যান্ডার্ড HH:mm:ss ফরম্যাট
+        correct_time_str = correct_bd_dt.strftime("%H:%M:%S")
         correct_date_str = correct_bd_dt.strftime("%d/%m/%Y")
-        correct_end_time = end_bd_dt.strftime("%I:%M %p")
+        correct_end_time = end_bd_dt.strftime("%H:%M:%S")
         correct_end_date = end_bd_dt.strftime("%d/%m/%Y")
 
         ev_data["time"] = correct_time_str
         ev_data["date"] = correct_date_str
         ev_data["end_time"] = correct_end_time
         ev_data["end_date"] = correct_end_date
-        ev_data["matchStatus"] = current_status
-        ev_data["status"] = current_status
 
         formatted_links = format_links_data(matched_match["streaming_links"])
         links_path = str(item_db.get("linksPath") or ev_data.get("linksPath") or ev_data.get("links") or f"links/{event_id}")
@@ -565,16 +507,6 @@ def sync_streaming_links_and_force_bd_time(live_feed, my_events):
         payload = {
             "id": str(event_id),
             "event": json.dumps(ev_data),
-            "date": correct_date_str,
-            "time": correct_time_str,
-            "end_date": correct_end_date,
-            "end_time": correct_end_time,
-            "matchStatus": current_status,
-            "status": current_status,
-            "category": ev_data.get("category") or "Football",
-            "teamAName": ev_data.get("teamAName"),
-            "teamBName": ev_data.get("teamBName"),
-            "eventName": ev_data.get("eventName"),
             "linksPath": links_path,
             "linksData": json.dumps(formatted_links),
             "requestData": generate_security_token()
@@ -583,7 +515,7 @@ def sync_streaming_links_and_force_bd_time(live_feed, my_events):
         try:
             up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
             if up_res.status_code == 200:
-                print(f"[{current_status.upper()} Synced] ID: {event_id} | {ev_data.get('teamAName')} vs {ev_data.get('teamBName')} -> {correct_date_str} {correct_time_str}")
+                print(f"[Fixed Crash & Synced] ID: {event_id} | {ev_data.get('teamAName')} vs {ev_data.get('teamBName')} -> BD: {correct_date_str} {correct_time_str}")
                 updated_count += 1
                 time.sleep(0.5)
         except Exception as e:
@@ -605,7 +537,7 @@ def main():
         time.sleep(2)
         my_events = get_my_saved_events()
 
-    # ২. Finished ট্যাবে ১০-১২টি রেখে বাকি পুরোনো ম্যাচ ডিলিট করা
+    # ২. Finished ট্যাবে ১০-১২টি রেখে অতিরিক্ত সমাপ্ত ম্যাচ মুছে ফেলা
     deleted = manage_finished_events_step(my_events)
     if deleted > 0:
         time.sleep(2)
@@ -623,17 +555,17 @@ def main():
 
     print(f"Total Matches found in Feed: {len(live_feed)}")
 
-    # ৩. ডাটাবেসের পুরোনো সব ম্যাচের সময় ও স্ট্যাটাস ফোর্স আপডেট করা
+    # ৩. ডাটাবেসের পুরোনো ম্যাচগুলোর ভুল সময় ফিক্স করা (অ্যাপ ক্র্যাশ বন্ধ করবে)
     updated = sync_streaming_links_and_force_bd_time(live_feed, my_events)
     if updated > 0:
         time.sleep(2)
         my_events = get_my_saved_events()
 
-    # ৪. লাইভ ম্যাচকে অগ্রাধিকার দিয়ে আগে লাইভগুলো এবং পরে ধাপে ধাপে আপকামিংগুলো অ্যাড করা
+    # ৪. লাইভ ম্যাচগুলো আগে ডাটাবেসে পুশ করা এবং ধাপে ধাপে আপকামিং ম্যাচ যোগ করা
     added = add_events_step(live_feed, my_events)
 
     print("\n==========================================")
-    print(f"Finished! Duplicates: {dup_removed} | Old Finished Deleted: {deleted} | Synced/Fixed: {updated} | Added: {added}")
+    print(f"Finished! Duplicates: {dup_removed} | Old Deleted: {deleted} | Fixed/Synced: {updated} | Added: {added}")
     print("==========================================")
 
 if __name__ == "__main__":
