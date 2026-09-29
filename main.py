@@ -130,7 +130,6 @@ def format_links_data(streaming_links):
             })
     return formatted
 
-# Smali কোডের হুবহু মডেলে নতুন ইভেন্ট অ্যাড ফাংশন
 def add_new_events_step(live_feed, my_events):
     now_bd = datetime.now(BD_TZ)
     now_utc = datetime.now(timezone.utc)
@@ -153,11 +152,9 @@ def add_new_events_step(live_feed, my_events):
         time_val = feed_match.get("time")
         match_utc_dt, match_bd_dt = parse_feed_time_to_bd(date_val, time_val)
 
-        # ১. অতীত ম্যাচ ফিল্টার
         if match_bd_dt < start_of_today_bd:
             continue
 
-        # ২. খেলা শেষ হয়ে গেলে ফিল্টার (ডিলিট করা ম্যাচ যাতে আর ফিরে না আসে)
         duration_min = 135
         if feed_match.get("end_time") and time_val:
             try:
@@ -187,7 +184,6 @@ def add_new_events_step(live_feed, my_events):
         if not clean_fa and not clean_ftitle:
             continue
 
-        # ৩. ডুপ্লিকেট ম্যাচ যাচাই
         already_exists = False
         for item_db in my_events:
             ev_data = item_db
@@ -217,7 +213,6 @@ def add_new_events_step(live_feed, my_events):
         if already_exists:
             continue
 
-        # ৪. Smali অনুযায়ী নতুন ইভেন্ট ও লিংক পে-লোড তৈরি
         links = feed_match.get("streaming_links") or feed_match.get("links") or []
         formatted_links = format_links_data(links)
 
@@ -229,7 +224,6 @@ def add_new_events_step(live_feed, my_events):
         unique_slug = f"links/{int(time.time() * 1000)}_{added_count}"
         end_dt = match_bd_dt + timedelta(minutes=duration_min)
 
-        # Smali Lf7/g.smali-এর হুবহু ডিকশনারি
         new_event_dict = {
             "visible": True,
             "isHot": False,
@@ -254,11 +248,10 @@ def add_new_events_step(live_feed, my_events):
 
         links_json_str = json.dumps(formatted_links)
 
-        # Smali অনুযায়ী আসল রিকোয়েস্ট পে-লোড
         insert_payload = {
             "event": json.dumps(new_event_dict),
-            "links": links_json_str,          # Smali-তে "links" চাওয়া হয়েছে!
-            "linksData": links_json_str,      # ব্যাকআপ
+            "links": links_json_str,
+            "linksData": links_json_str,
             "linksPath": unique_slug,
             "requestData": generate_security_token()
         }
@@ -268,14 +261,15 @@ def add_new_events_step(live_feed, my_events):
             if in_res.status_code in [200, 201]:
                 added_count += 1
                 print(f"[Added Event {added_count}/{MAX_ADD_PER_RUN}] {t_a_raw} vs {t_b_raw} | Links: {len(formatted_links)}")
+                # Git Commit সম্পূর্ণ হওয়ার জন্য ২.৫ সেকেন্ড বিরতি
+                time.sleep(2.5)
             else:
-                print(f"Failed to add {t_a_raw}, status: {in_res.status_code} | Res: {in_res.text}")
+                time.sleep(1)
         except Exception as e:
             print(f"Error adding {t_a_raw}:", e)
 
     return added_count
 
-# আগের হুবহু পদ্ধতিতে বিদ্যমান সব ম্যাচের স্ট্রিমিং লিংক আপডেট
 def sync_streaming_links_step(live_feed, my_events):
     indexed_feed = []
     for f in live_feed:
@@ -368,15 +362,15 @@ def main():
 
     print(f"Total Matches found in Feed: {len(live_feed)}")
 
-    # ১. নতুন ম্যাচ সর্বোচ্চ ৫টি অ্যাড করা (সরাসরি লিংক সহ)
+    # ১. নতুন ম্যাচ ৫টি অ্যাড করা
     added = add_new_events_step(live_feed, my_events)
 
-    # ২. নতুন ম্যাচ অ্যাড হলে রিফ্রেশ করা
+    # ২. ডাটাবেস রিফ্রেশ
     if added > 0:
         time.sleep(2)
         my_events = get_my_saved_events()
 
-    # ৩. সব ম্যাচের স্ট্রিমিং লিঙ্ক সিঙ্ক করা
+    # ৩. সব ম্যাচের লিংক সিঙ্ক
     updated = sync_streaming_links_step(live_feed, my_events)
 
     print("\n==========================================")
