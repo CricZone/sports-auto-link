@@ -37,15 +37,22 @@ def get_my_saved_events():
         print("Error fetching saved events:", e)
     return []
 
-def emergency_crash_fix():
+def complete_database_repair():
     events = get_my_saved_events()
-    print(f"Total Events Found: {len(events)}")
-    fixed_count = 0
+    total = len(events)
+    print(f"--- Starting Complete Repair for {total} Events ---")
+
+    now_bd = datetime.now(BD_TZ)
+    default_date = now_bd.strftime("%Y-%m-%d")
+    default_time = now_bd.strftime("%Y-%m-%d %H:%M:%S")
+
+    success_count = 0
+    failed_ids = []
 
     for idx, item in enumerate(events):
         ev_id = str(item.get("id"))
         
-        # ইভেন্ট ডাটা পার্স করা
+        # ১. ইভেন্ট ডাটা এক্সট্রাক্ট করা
         ev_data = {}
         if "event" in item and isinstance(item["event"], str):
             try:
@@ -55,48 +62,95 @@ def emergency_crash_fix():
         elif isinstance(item.get("event"), dict):
             ev_data = item.get("event")
 
-        # ১. links কে নিশ্চিতভাবে JSONArray (তালিকা) বানানো
-        curr_links = ev_data.get("links")
-        if isinstance(curr_links, list):
-            formatted_links = curr_links
+        # ২. links অ্যারে নিশ্চিত করা
+        links_val = ev_data.get("links")
+        if isinstance(links_val, list):
+            formatted_links = links_val
         else:
-            # যদি স্ট্রিং হয়ে থাকে, তবে খালি তালিকা বা ডিফল্ট সার্ভার স্ট্রাকচার দেওয়া
             formatted_links = []
 
-        # ২. event অবজেক্ট ঠিক করা
-        ev_data["links"] = formatted_links
-        ev_data["visible"] = True
-        ev_data["status"] = ev_data.get("status") or "Not Started"
+        # ৩. কোনো ফিল্ড যেন null না থাকে (Crash Protection)
+        team_a = str(ev_data.get("teamAName") or item.get("teamAName") or "Team A").strip()
+        team_b = str(ev_data.get("teamBName") or item.get("teamBName") or "Team B").strip()
         
-        # ৩. order_index নিশ্চিত করা
-        order = item.get("order_index")
-        if order is None or not str(order).lstrip('-').isdigit():
-            order = idx + 10
+        tournament = str(ev_data.get("eventName") or ev_data.get("match_title") or ev_data.get("tournament") or "International Friendly Games").strip()
+        category = str(ev_data.get("category") or "Football").strip()
+        
+        # টাইম ভ্যালিডেশন (স্প্লিট ক্র্যাশ এড়াতে পূর্ণাঙ্গ ফরম্যাট)
+        time_raw = str(ev_data.get("time") or "").strip()
+        if len(time_raw) < 10:
+            time_val = default_time
         else:
-            order = int(order)
+            time_val = time_raw
+
+        date_val = str(ev_data.get("date") or default_date).strip()
+
+        # শতভাগ নিরাপদ ইভেন্ট অবজেক্ট
+        repaired_event = {
+            "visible": True,
+            "isHot": False,
+            "priority": -1,
+            "category": category,
+            "eventName": tournament,
+            "match_title": tournament,
+            "matchTitle": tournament,
+            "eventLogo": str(ev_data.get("eventLogo") or ""),
+            "teamAName": team_a,
+            "teamBName": team_b,
+            "teamAFlag": str(ev_data.get("teamAFlag") or ""),
+            "teamBFlag": str(ev_data.get("teamBFlag") or ""),
+            "date": date_val,
+            "time": time_val,
+            "status": "Not Started",
+            "links": formatted_links,
+            "notiThumb": "",
+            "countryCodes": "",
+            "whitelistCountryCodes": "",
+            "messages": "{}"
+        }
+
+        # order_index সুরক্ষিত রাখা
+        raw_order = item.get("order_index")
+        if raw_order is not None and str(raw_order).lstrip('-').isdigit():
+            order_idx = int(raw_order)
+        else:
+            order_idx = idx + 10
 
         payload = {
             "from": "events",
             "id": ev_id,
-            "event": json.dumps(ev_data),
+            "event": json.dumps(repaired_event),
             "links": f"links/{ev_id}",
             "linksPath": f"links/{ev_id}",
             "linksData": json.dumps(formatted_links),
-            "order_index": order,
+            "order_index": order_idx,
             "requestData": generate_security_token()
         }
 
-        try:
-            res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
-            if res.status_code == 200:
-                fixed_count += 1
-                print(f"[{fixed_count}/{len(events)}] Fixed ID {ev_id} | Links Array Restored")
-            # ফাইলের SHA রেস-কন্ডিশন এড়াতে ২ সেকেন্ড বিরতি
-            time.sleep(2)
-        except Exception as e:
-            print(f"Error on ID {ev_id}:", e)
+        # ৪. আপডেট ও রিট্রাই মেকানিজম
+        updated = False
+        for attempt in range(2):
+            try:
+                res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
+                if res.status_code == 200:
+                    updated = True
+                    success_count += 1
+                    print(f"[{success_count}/{total}] Fixed ID {ev_id} | {team_a} vs {team_b}")
+                    break
+                else:
+                    time.sleep(2)
+            except Exception:
+                time.sleep(2)
 
-    print(f"\nSuccessfully repaired {fixed_count} events. Apps will now open properly.")
+        if not updated:
+            failed_ids.append(ev_id)
+            print(f"[FAILED] Could not update ID {ev_id}")
+
+        time.sleep(2)
+
+    print(f"\nRepair Finished! Successfully fixed: {success_count}/{total}")
+    if failed_ids:
+        print(f"Failed IDs: {failed_ids}")
 
 if __name__ == "__main__":
-    emergency_crash_fix()
+    complete_database_repair()
