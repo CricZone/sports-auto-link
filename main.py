@@ -93,7 +93,56 @@ def get_my_saved_events():
     return []
 
 # -------------------------------------------------------------
-# অটো-ডিলিট ফাংশন (খেলা শেষ হয়ে যাওয়া এবং অতীত ম্যাচ মোছা)
+# ডুপ্লিকেট ম্যাচ অটো-রিমুভার (একই ম্যাচের একাধিক কপি ডিলিট করবে)
+# -------------------------------------------------------------
+def remove_duplicate_events_step(my_events):
+    seen = {}
+    deleted_dup = 0
+
+    for item_db in my_events:
+        event_id = item_db.get("id")
+        if not event_id:
+            continue
+
+        ev_data = item_db
+        if "event" in item_db and isinstance(item_db["event"], str):
+            try:
+                ev_data = json.loads(item_db["event"])
+            except Exception:
+                pass
+
+        t_a = clean_name(ev_data.get("teamAName") or item_db.get("teamAName") or ev_data.get("team1"))
+        t_b = clean_name(ev_data.get("teamBName") or item_db.get("teamBName") or ev_data.get("team2"))
+        title = clean_name(ev_data.get("eventName") or ev_data.get("tournament") or ev_data.get("title"))
+
+        if t_a and t_b:
+            match_key = tuple(sorted([t_a, t_b]))
+        elif title:
+            match_key = (title,)
+        else:
+            continue
+
+        # যদি এই ম্যাচ আগে একবার দেখা হয়ে থাকে, তবে এটি ডুপ্লিকেট কপি -> ডিলিট করে দাও
+        if match_key in seen:
+            del_payload = {
+                "id": int(event_id) if str(event_id).isdigit() else str(event_id),
+                "requestData": generate_security_token()
+            }
+            try:
+                del_res = requests.post(BASE_URL + "admin/delete_event", json=del_payload, headers=get_headers(), timeout=12)
+                if del_res.status_code in [200, 201]:
+                    deleted_dup += 1
+                    print(f"[Duplicate Removed] ID: {event_id} | {t_a} vs {t_b}")
+                    time.sleep(1.5)
+            except Exception as e:
+                print(f"Error removing duplicate {event_id}:", e)
+        else:
+            seen[match_key] = event_id
+
+    return deleted_dup
+
+# -------------------------------------------------------------
+# অতীত এবং মেয়াদোত্তীর্ণ ম্যাচ ডিলিট ফাংশন
 # -------------------------------------------------------------
 def delete_expired_events_step(my_events):
     now_bd = datetime.now(BD_TZ)
@@ -123,16 +172,13 @@ def delete_expired_events_step(my_events):
         end_time_str = ev_data.get("end_time") or item_db.get("end_time")
 
         is_expired = False
-        # ১. ২৮/০৯/২০২৬ বা তার আগের সব অতীত ম্যাচ ডিলিট
         if match_bd_dt < start_of_today_bd:
             is_expired = True
-        # ২. আজকের ম্যাচ কিন্তু খেলার নির্ধারিত শেষ সময় পার হয়ে গেছে
         elif end_date_str and end_time_str:
             _, end_bd_dt = parse_feed_time_to_bd(end_date_str, end_time_str)
             if end_bd_dt < now_bd:
                 is_expired = True
         else:
-            # ডিফল্ট ১৩৫ মিনিট পর খেলা শেষ ধরে ডিলিট
             if match_bd_dt + timedelta(minutes=135) < now_bd:
                 is_expired = True
 
@@ -210,17 +256,13 @@ def add_new_events_step(live_feed, my_events):
         time_val = feed_match.get("time")
         match_utc_dt, match_bd_dt = parse_feed_time_to_bd(date_val, time_val)
 
-        # ১. ২৮/০৯/২০২৬ বা তার আগের সব অতীত ম্যাচ বাদ
         if match_bd_dt < start_of_today_bd:
             continue
 
-        # ২. শুধুমাত্র আজকের বা পেছনের দিনের খেলা live_ended হলে বাদ দেবে। 
-        # ভবিষ্যতের দিনের ম্যাচ হলে (যেমন Argentina vs Bolivia) ফিডের ভুল live_ended উপেক্ষা করে অ্যাড করবে।
         raw_status = str(feed_match.get("matchStatus") or feed_match.get("status") or "").lower()
         if match_utc_dt <= now_utc and raw_status in ["live_ended", "finished", "ended"]:
             continue
 
-        # ৩. খেলার নির্ধারিত সময় শেষ হলে বাদ
         duration_min = 135
         if feed_match.get("end_time") and time_val:
             try:
@@ -250,7 +292,6 @@ def add_new_events_step(live_feed, my_events):
         if not clean_fa and not clean_ftitle:
             continue
 
-        # ৪. শুধুমাত্র টিম নাম দিয়ে ডুপ্লিকেট যাচাই
         already_exists = False
         for item_db in my_events:
             ev_data = item_db
@@ -319,7 +360,6 @@ def add_new_events_step(live_feed, my_events):
             "requestData": generate_security_token()
         }
 
-        # গিটহাব ফাইল রাইট কনফ্লিক্ট এড়াতে অটো-রিট্রাই ব্যবস্থা
         success = False
         for attempt in range(3):
             try:
@@ -328,8 +368,10 @@ def add_new_events_step(live_feed, my_events):
                 if in_res.status_code in [200, 201]:
                     added_count += 1
                     print(f"[Added Event {added_count}/{MAX_ADD_PER_RUN}] {t_a_raw} vs {t_b_raw} | Links: {len(formatted_links)}")
+                    # সেভ হওয়া নতুন ম্যাচটি my_events-এ সাথে সাথে রেজিস্টার করা (যাতে এক রানে ডুপ্লিকেট না হতে পারে)
+                    my_events.append(new_event_dict)
                     success = True
-                    time.sleep(2.5)  # ফাইল রাইট সম্পন্ন হওয়ার নিরাপদ বিরতি
+                    time.sleep(2.5)
                     break
                 else:
                     time.sleep(2.0)
@@ -421,7 +463,13 @@ def main():
     my_events = get_my_saved_events()
     print(f"Total Events currently in Panel: {len(my_events)}")
 
-    # ১. অতীত এবং শেষ হয়ে যাওয়া ম্যাচগুলো আগে অটো-ডিলিট করা
+    # ১. বিদ্যমান ডুপ্লিকেট ম্যাচগুলো আগে স্বয়ংক্রিয়ভাবে মুছে ফেলা
+    dup_removed = remove_duplicate_events_step(my_events)
+    if dup_removed > 0:
+        time.sleep(2)
+        my_events = get_my_saved_events()
+
+    # ২. শেষ হয়ে যাওয়া ম্যাচগুলো অটো-ডিলিট করা
     deleted = delete_expired_events_step(my_events)
     if deleted > 0:
         time.sleep(2)
@@ -439,19 +487,19 @@ def main():
 
     print(f"Total Matches found in Feed: {len(live_feed)}")
 
-    # ২. নতুন ম্যাচ সর্বোচ্চ ৫টি করে অ্যাড করা
+    # ৩. নতুন ম্যাচ সর্বোচ্চ ৫টি করে অ্যাড করা
     added = add_new_events_step(live_feed, my_events)
 
-    # ৩. নতুন ম্যাচ অ্যাড হলে ডাটাবেস রিফ্রেশ করা
+    # ৪. ডাটাবেস রিফ্রেশ করা
     if added > 0:
         time.sleep(2)
         my_events = get_my_saved_events()
 
-    # ৪. সব ম্যাচের স্ট্রিমিং লিঙ্ক সিঙ্ক করা
+    # ৫. স্ট্রিমিং লিঙ্ক সিঙ্ক করা
     updated = sync_streaming_links_step(live_feed, my_events)
 
     print("\n==========================================")
-    print(f"Finished! Deleted: {deleted} | Added: {added} | Links Updated: {updated}")
+    print(f"Finished! Duplicates Removed: {dup_removed} | Expired Deleted: {deleted} | Added: {added} | Links Updated: {updated}")
     print("==========================================")
 
 if __name__ == "__main__":
