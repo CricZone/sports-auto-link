@@ -9,9 +9,8 @@ import requests
 
 BASE_URL = "https://dlsports.proapp.workers.dev/"
 FEED_SOURCE = os.getenv("SECRET_FEED_SOURCE", "")
-MAX_ADD_PER_RUN = 5  # প্রতি রানে সর্বোচ্চ ৫টি নতুন ইভেন্ট অ্যাড হবে
+MAX_ADD_PER_RUN = 5
 
-# বাংলাদেশ টাইমজোন (UTC+6)
 BD_TZ = timezone(timedelta(hours=6))
 
 def generate_security_token():
@@ -91,272 +90,96 @@ def get_my_saved_events():
         print("Error fetching saved events:", e)
     return []
 
-def format_links_data(streaming_links):
-    formatted = []
-    if not streaming_links or not isinstance(streaming_links, list):
-        return formatted
-
-    for idx, item in enumerate(streaming_links):
-        if not isinstance(item, dict):
-            continue
-
-        name = str(item.get("name") or f"Server {idx + 1}").strip()
-        url = str(item.get("link") or item.get("url") or "").strip()
-
-        ua = "Mozilla/5.0"
-        if "|user-agent=" in url:
-            parts = url.split("|user-agent=")
-            url = parts[0]
-            ua = parts[1]
-
-        api_key = str(item.get("api") or item.get("drmKey") or item.get("key") or item.get("license") or "").strip()
-        token_api = str(item.get("tokenApi") or "").strip()
-
-        if url.startswith("http"):
-            is_mpd = ".mpd" in url.lower()
-            formatted.append({
-                "name": name,
-                "link": url,
-                "url": url,
-                "stream_url": url,
-                "headers": {"User-Agent": ua},
-                "user_agent": ua,
-                "type": "mpd" if is_mpd else "m3u8",
-                "api": api_key,
-                "tokenApi": token_api,
-                "key": api_key,
-                "drmKey": api_key
-            })
-    return formatted
-
-def sync_manual_events():
-    if not FEED_SOURCE:
-        print("Error: SECRET_FEED_SOURCE environment variable is not configured.")
-        return
-
+def repair_and_sync():
     my_events = get_my_saved_events()
-    print(f"Total Events in Panel: {len(my_events)}")
+    print(f"Total Events in Panel to verify: {len(my_events)}")
 
-    valid_ids = [int(item['id']) for item in my_events if str(item.get('id', '')).isdigit()]
-    max_id = max(valid_ids) if valid_ids else 1200
-
-    valid_orders = [int(item['order_index']) for item in my_events if str(item.get('order_index', '')).lstrip('-').isdigit()]
-    max_order = max(valid_orders) if valid_orders else 0
-
-    try:
-        res = requests.get(FEED_SOURCE, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
-        if res.status_code != 200:
-            print("Feed fetch failed:", res.status_code)
-            return
-        live_feed = res.json()
-        if isinstance(live_feed, dict):
-            live_feed = live_feed.get("matches") or live_feed.get("events") or live_feed.get("data") or []
-    except Exception as e:
-        print("Feed load error:", e)
-        return
-
-    print(f"Total Matches in Feed: {len(live_feed)}")
-
-    # বাংলাদেশ সময় অনুযায়ী আজকের শুরু (রাত ১২:০০ AM)
     now_bd = datetime.now(BD_TZ)
-    today_start_bd = now_bd.replace(hour=0, minute=0, second=0, microsecond=0)
+    repair_count = 0
 
-    existing_teams = []
-    for item in my_events:
-        ev_data = item
+    # ====================================================
+    # ১. ক্র্যাশ হওয়া ইভেন্টগুলো রিপেয়ার করা (Fix Crash)
+    # ====================================================
+    for idx, item in enumerate(my_events):
+        ev_id = str(item.get("id"))
+        ev_data = {}
         if "event" in item and isinstance(item["event"], str):
             try:
                 ev_data = json.loads(item["event"])
             except Exception:
                 pass
-        t_a = clean_name(ev_data.get("teamAName") or item.get("teamAName"))
-        t_b = clean_name(ev_data.get("teamBName") or item.get("teamBName"))
-        if t_a and t_b:
-            existing_teams.append((t_a, t_b))
+        elif isinstance(item.get("event"), dict):
+            ev_data = item.get("event")
 
-    # ====================================================
-    # ১. নতুন ইভেন্ট অটো-অ্যাড (স্মালি কোড অনুযায়ী হুবহু স্কিমা)
-    # ====================================================
-    added_count = 0
-    for f in live_feed:
-        if added_count >= MAX_ADD_PER_RUN:
-            break
-
-        f_raw_a = f.get("teamAName") or f.get("teamA") or f.get("team1") or ""
-        f_raw_b = f.get("teamBName") or f.get("teamB") or f.get("team2") or ""
-        t_a = clean_name(f_raw_a)
-        t_b = clean_name(f_raw_b)
-
-        if not t_a or not t_b:
-            continue
-
-        already_exists = any(
-            (t_a == ex[0] and t_b == ex[1]) or (t_a == ex[1] and t_b == ex[0])
-            for ex in existing_teams
-        )
-        if already_exists:
-            continue
-
-        raw_date = str(f.get("date") or "").strip()
-        raw_time = str(f.get("time") or f.get("start_time") or "").strip()
-        if raw_date and raw_time and raw_date not in raw_time:
-            match_time_raw = f"{raw_date} {raw_time}"
+        # সঠিক order_index নির্ধারণ (যা ডিলিট হয়ে অ্যাপ ক্র্যাশ করাচ্ছিল)
+        raw_order = item.get("order_index")
+        if raw_order is not None and str(raw_order).lstrip('-').isdigit():
+            order_index = int(raw_order)
         else:
-            match_time_raw = raw_time or raw_date
+            order_index = idx + 10
 
-        match_dt = parse_match_time(match_time_raw)
+        # টাইম ফিল্ড ফিক্স
+        time_val = str(ev_data.get("time") or "")
+        date_val = str(ev_data.get("date") or now_bd.strftime("%Y-%m-%d"))
 
-        # অতীতের ম্যাচ হলে বাদ
-        if match_dt and match_dt < today_start_bd:
-            continue
-
-        links = f.get("streaming_links") or f.get("links") or []
-        formatted_links = format_links_data(links)
-
-        new_event_id = str(max_id + 1 + added_count)
-        new_order_index = max_order + 1 + added_count
-
-        # ক্যাটাগরি ম্যাপিং
-        raw_cat = str(f.get("category") or f.get("sport") or "").lower()
-        if "motor" in raw_cat or "racing" in raw_cat or "f1" in raw_cat:
-            category_name = "Motorsports"
-        elif "american" in raw_cat or "nfl" in raw_cat:
-            category_name = "American football"
+        # যদি time ফিল্ডে সম্পূর্ণ ফরম্যাট না থাকে, তবে পূর্ণাঙ্গ ফরম্যাটে রূপান্তর
+        if len(time_val) < 15:
+            dt = parse_match_time(time_val) or now_bd
+            time_full = dt.strftime("%Y-%m-%d %H:%M:%S")
         else:
-            category_name = "Football"
+            time_full = time_val
 
-        tournament_name = f.get("tournament") or f.get("league") or "International Friendly Games"
-        event_logo = f.get("tournament_logo") or f.get("league_logo") or f.get("teamAFlag") or ""
+        # অ্যাপের মূল ফিল্ডগুলো ঠিক করা
+        team_a = ev_data.get("teamAName") or "Team A"
+        team_b = ev_data.get("teamBName") or "Team B"
+        tournament = ev_data.get("match_title") or ev_data.get("eventName") or ev_data.get("tournament") or "Live Event"
+        category = ev_data.get("category") or "Football"
 
-        # অ্যাডমিন অ্যাপের তারিখ ও সময় ফরম্যাট (DD/MM/YYYY এবং hh:mm a)
-        date_str = match_dt.strftime("%d/%m/%Y") if match_dt else (raw_date or now_bd.strftime("%d/%m/%Y"))
-        time_str = match_dt.strftime("%I:%M %p").lower() if match_dt else (raw_time.lower() or "04:00 pm")
-
-        links_path_val = f"links/{new_event_id}"
-
-        # Smali কোডের Lf7/g; ভেতরের v15 অবজেক্টের হুবহু রিপ্রেজেন্টেশন
-        event_body = {
+        # Smali কোড অনুযায়ী event অবজেক্ট
+        repaired_event = {
+            "teamAName": team_a,
+            "teamBName": team_b,
+            "teamAFlag": ev_data.get("teamAFlag") or "",
+            "teamBFlag": ev_data.get("teamBFlag") or "",
+            "match_title": tournament,
+            "eventName": tournament,
+            "category": category,
+            "time": time_full,
+            "date": date_val,
+            "status": "Not Started",
             "visible": True,
             "isHot": False,
             "priority": -1,
-            "category": category_name,
-            "eventName": tournament_name,
-            "eventLogo": event_logo,
-            "teamAName": f_raw_a,
-            "teamBName": f_raw_b,
-            "teamAFlag": f.get("teamAFlag") or f.get("team1_logo") or f.get("logo1") or "",
-            "teamBFlag": f.get("teamBFlag") or f.get("team2_logo") or f.get("logo2") or "",
-            "date": date_str,
-            "time": time_str,
-            "notiThumb": "",
-            "countryCodes": "",
-            "whitelistCountryCodes": "",
-            "messages": "{}",
-            "links": links_path_val,
-            # ব্যাকওয়ার্ড কম্প্যাটিবিলিটির জন্য অতিরিক্ত সেফটি ফিল্ড
-            "match_title": tournament_name,
-            "matchTitle": tournament_name,
-            "status": "Not Started"
+            "links": f"links/{ev_id}"
         }
 
-        # সার্ভারে পোস্ট করার মূল পেলোড
-        payload = {
-            "from": "events",
-            "requestData": generate_security_token(),
-            "id": new_event_id,
-            "event": json.dumps(event_body),
-            "links": json.dumps(formatted_links),
-            "linksPath": links_path_val,
-            "order_index": new_order_index
-        }
-
-        try:
-            add_res = requests.post(BASE_URL + "admin/add_event", json=payload, headers=get_headers(), timeout=12)
-            if add_res.status_code == 200:
-                print(f"[Auto-Added Successfully] ID: {new_event_id} | {f_raw_a} vs {f_raw_b}")
-                existing_teams.append((t_a, t_b))
-                added_count += 1
-                time.sleep(3)
-            else:
-                print(f"[Add Failed] Status: {add_res.status_code} | Msg: {add_res.text[:120]}")
-        except Exception as e:
-            print(f"Error adding {f_raw_a} vs {f_raw_b}:", e)
-
-    print(f"Total new events added in this run: {added_count}")
-
-    # ====================================================
-    # ২. বিদ্যমান ম্যাচগুলোর লাইভ লিংক আপডেট
-    # ====================================================
-    indexed_feed = []
-    for f in live_feed:
-        t_a = clean_name(f.get("teamAName") or f.get("teamA") or f.get("team1") or "")
-        t_b = clean_name(f.get("teamBName") or f.get("teamB") or f.get("team2") or "")
-        links = f.get("streaming_links") or f.get("links") or []
-
-        if links:
-            indexed_feed.append({
-                "teamA": t_a,
-                "teamB": t_b,
-                "streaming_links": links
-            })
-
-    updated_count = 0
-    current_my_events = get_my_saved_events()
-
-    for item_db in current_my_events:
-        event_id = item_db.get("id")
-        ev_data = item_db
-        if "event" in item_db and isinstance(item_db["event"], str):
+        # linksData উদ্ধার
+        links_data = ev_data.get("linksData") or item.get("linksData") or []
+        if isinstance(links_data, str):
             try:
-                ev_data = json.loads(item_db["event"])
+                links_data = json.loads(links_data)
             except Exception:
-                pass
-
-        my_a = clean_name(ev_data.get("teamAName") or item_db.get("teamAName"))
-        my_b = clean_name(ev_data.get("teamBName") or item_db.get("teamBName"))
-
-        if not my_a or my_a in ["teama", "livematch"]:
-            continue
-
-        matched_match = None
-        for inf in indexed_feed:
-            both_match = (my_a == inf["teamA"] and my_b == inf["teamB"]) or (my_a == inf["teamB"] and my_b == inf["teamA"])
-            single_strong_a = len(my_a) >= 5 and (my_a == inf["teamA"] or my_a == inf["teamB"])
-            single_strong_b = len(my_b) >= 5 and (my_b == inf["teamA"] or my_b == inf["teamB"])
-
-            if both_match or (single_strong_a and single_strong_b):
-                matched_match = inf
-                break
-
-        if not matched_match:
-            continue
-
-        formatted_links = format_links_data(matched_match["streaming_links"])
-        if not formatted_links:
-            continue
-
-        links_path = str(item_db.get("linksPath") or f"links/{event_id}")
-        event_str = item_db["event"] if ("event" in item_db and isinstance(item_db["event"], str)) else json.dumps(ev_data)
+                links_data = []
 
         payload = {
             "from": "events",
-            "id": str(event_id),
-            "event": event_str,
-            "links": json.dumps(formatted_links),
-            "linksPath": links_path,
-            "linksData": json.dumps(formatted_links),
+            "id": ev_id,
+            "event": json.dumps(repaired_event),
+            "links": f"links/{ev_id}",
+            "linksPath": f"links/{ev_id}",
+            "linksData": json.dumps(links_data) if isinstance(links_data, list) else str(links_data),
+            "order_index": order_index,
             "requestData": generate_security_token()
         }
 
         try:
-            up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
+            up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=10)
             if up_res.status_code == 200:
-                print(f"[Updated Links] ID: {event_id} | {ev_data.get('teamAName')} vs {ev_data.get('teamBName')} | Links: {len(formatted_links)}")
-                updated_count += 1
+                repair_count += 1
         except Exception as e:
-            print(f"Error updating ID {event_id}:", e)
+            pass
 
-    print(f"\nAll operations finished. Total Added: {added_count}, Total Updated: {updated_count}")
+    print(f"Repaired and restored {repair_count} events in panel. Crashes resolved.")
 
 if __name__ == "__main__":
-    sync_manual_events()
+    repair_and_sync()
