@@ -37,120 +37,134 @@ def get_my_saved_events():
         print("Error fetching saved events:", e)
     return []
 
-def complete_database_repair():
+def delete_corrupt_event(ev_id):
+    """ফিক্স না হলে নষ্ট ইভেন্টটি ডাটাবেস থেকে মুছে ফেলা"""
+    payload = {
+        "from": "events",
+        "id": str(ev_id),
+        "requestData": generate_security_token()
+    }
+    for endpoint in ["admin/delete_event", "admin/delete"]:
+        try:
+            del_res = requests.post(BASE_URL + endpoint, json=payload, headers=get_headers(), timeout=10)
+            if del_res.status_code == 200:
+                print(f"[DELETED] Successfully removed broken event ID: {ev_id}")
+                return True
+        except Exception:
+            pass
+    return False
+
+def targeted_repair():
     events = get_my_saved_events()
     total = len(events)
-    print(f"--- Starting Complete Repair for {total} Events ---")
+    print(f"Total events found in database: {total}")
 
     now_bd = datetime.now(BD_TZ)
     default_date = now_bd.strftime("%Y-%m-%d")
     default_time = now_bd.strftime("%Y-%m-%d %H:%M:%S")
 
-    success_count = 0
-    failed_ids = []
-
-    for idx, item in enumerate(events):
+    # অ্যাপ ক্র্যাশ প্রতিরোধে শতভাগ বাধ্যতামূলক ফিল্ড চেক
+    corrupted_items = []
+    for item in events:
         ev_id = str(item.get("id"))
-        
-        # ১. ইভেন্ট ডাটা এক্সট্রাক্ট করা
-        ev_data = {}
+        ev_data = None
+
         if "event" in item and isinstance(item["event"], str):
             try:
                 ev_data = json.loads(item["event"])
             except Exception:
-                ev_data = {}
+                ev_data = None
         elif isinstance(item.get("event"), dict):
             ev_data = item.get("event")
 
-        # ২. links অ্যারে নিশ্চিত করা
-        links_val = ev_data.get("links")
-        if isinstance(links_val, list):
-            formatted_links = links_val
+        # যে ম্যাচগুলোতে কোনো ফিল্ড null বা খালি আছে
+        if not ev_data or not isinstance(ev_data, dict):
+            corrupted_items.append((ev_id, item, {}))
         else:
-            formatted_links = []
+            time_val = ev_data.get("time")
+            date_val = ev_data.get("date")
+            cat_val = ev_data.get("category")
+            title_val = ev_data.get("match_title") or ev_data.get("eventName")
+            links_val = ev_data.get("links")
 
-        # ৩. কোনো ফিল্ড যেন null না থাকে (Crash Protection)
+            if not time_val or not date_val or not cat_val or not title_val or not isinstance(links_val, list):
+                corrupted_items.append((ev_id, item, ev_data))
+
+    print(f"\nIdentified {len(corrupted_items)} corrupted/risky events that can crash the app.\n")
+
+    if not corrupted_items:
+        print("No corrupted events found. All events have valid non-null fields.")
+        return
+
+    fixed_count = 0
+    deleted_count = 0
+
+    for ev_id, item, ev_data in corrupted_items:
         team_a = str(ev_data.get("teamAName") or item.get("teamAName") or "Team A").strip()
         team_b = str(ev_data.get("teamBName") or item.get("teamBName") or "Team B").strip()
         
-        tournament = str(ev_data.get("eventName") or ev_data.get("match_title") or ev_data.get("tournament") or "International Friendly Games").strip()
-        category = str(ev_data.get("category") or "Football").strip()
-        
-        # টাইম ভ্যালিডেশন (স্প্লিট ক্র্যাশ এড়াতে পূর্ণাঙ্গ ফরম্যাট)
-        time_raw = str(ev_data.get("time") or "").strip()
-        if len(time_raw) < 10:
-            time_val = default_time
-        else:
-            time_val = time_raw
+        # .split() ক্র্যাশ রোধে category এবং tournament ফরম্যাট
+        category_name = "Football || International Friendly Games"
+        tournament_name = str(ev_data.get("eventName") or ev_data.get("match_title") or "International Friendly Games").strip()
 
-        date_val = str(ev_data.get("date") or default_date).strip()
-
-        # শতভাগ নিরাপদ ইভেন্ট অবজেক্ট
-        repaired_event = {
+        clean_event = {
             "visible": True,
             "isHot": False,
             "priority": -1,
-            "category": category,
-            "eventName": tournament,
-            "match_title": tournament,
-            "matchTitle": tournament,
+            "category": category_name,
+            "eventName": tournament_name,
+            "match_title": tournament_name,
+            "matchTitle": tournament_name,
             "eventLogo": str(ev_data.get("eventLogo") or ""),
             "teamAName": team_a,
             "teamBName": team_b,
             "teamAFlag": str(ev_data.get("teamAFlag") or ""),
             "teamBFlag": str(ev_data.get("teamBFlag") or ""),
-            "date": date_val,
-            "time": time_val,
+            "date": default_date,
+            "time": default_time,
             "status": "Not Started",
-            "links": formatted_links,
+            "links": [],
             "notiThumb": "",
             "countryCodes": "",
             "whitelistCountryCodes": "",
             "messages": "{}"
         }
 
-        # order_index সুরক্ষিত রাখা
         raw_order = item.get("order_index")
-        if raw_order is not None and str(raw_order).lstrip('-').isdigit():
-            order_idx = int(raw_order)
-        else:
-            order_idx = idx + 10
+        order_idx = int(raw_order) if (raw_order is not None and str(raw_order).lstrip('-').isdigit()) else 10
 
         payload = {
             "from": "events",
             "id": ev_id,
-            "event": json.dumps(repaired_event),
+            "event": json.dumps(clean_event),
             "links": f"links/{ev_id}",
             "linksPath": f"links/{ev_id}",
-            "linksData": json.dumps(formatted_links),
+            "linksData": "[]",
             "order_index": order_idx,
             "requestData": generate_security_token()
         }
 
-        # ৪. আপডেট ও রিট্রাই মেকানিজম
+        # নিরাপদ বিরতি সহ আপডেট চেষ্টা
         updated = False
-        for attempt in range(2):
-            try:
-                res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
-                if res.status_code == 200:
-                    updated = True
-                    success_count += 1
-                    print(f"[{success_count}/{total}] Fixed ID {ev_id} | {team_a} vs {team_b}")
-                    break
-                else:
-                    time.sleep(2)
-            except Exception:
-                time.sleep(2)
+        try:
+            res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
+            if res.status_code == 200:
+                updated = True
+                fixed_count += 1
+                print(f"[REPAIRED] ID: {ev_id} | {team_a} vs {team_b}")
+            else:
+                print(f"[UPDATE FAILED] ID: {ev_id} | Status: {res.status_code} | Msg: {res.text[:80]}")
+        except Exception as e:
+            print(f"[ERROR] ID {ev_id}: {e}")
 
+        # আপডেট না নিলে ডাটাবেস থেকে ডিলিট করে ক্লিন করা
         if not updated:
-            failed_ids.append(ev_id)
-            print(f"[FAILED] Could not update ID {ev_id}")
+            if delete_corrupt_event(ev_id):
+                deleted_count += 1
 
-        time.sleep(2)
+        time.sleep(3.5)
 
-    print(f"\nRepair Finished! Successfully fixed: {success_count}/{total}")
-    if failed_ids:
-        print(f"Failed IDs: {failed_ids}")
+    print(f"\n--- Finish: Repaired: {fixed_count}, Deleted: {deleted_count} ---")
 
 if __name__ == "__main__":
-    complete_database_repair()
+    targeted_repair()
