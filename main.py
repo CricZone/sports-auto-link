@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import base64
 from datetime import datetime, timezone, timedelta
 import json
@@ -49,12 +50,12 @@ def fix_image_url(url):
 
 def parse_feed_time_to_bd(date_str, time_str):
     if not date_str:
-        return None, None, None
+        return None, None
 
     try:
         d_parts = date_str.replace('-', '/').split('/')
         if len(d_parts) != 3:
-            return None, None, None
+            return None, None
         
         day, month, year = int(d_parts[0]), int(d_parts[1]), int(d_parts[2])
 
@@ -67,11 +68,9 @@ def parse_feed_time_to_bd(date_str, time_str):
 
         match_utc_dt = datetime(year, month, day, hh, mm, ss, tzinfo=timezone.utc)
         match_bd_dt = match_utc_dt.astimezone(BD_TZ)
-
-        display_time = match_bd_dt.strftime("%I:%M %p %d/%m/%Y")
-        return match_utc_dt, match_bd_dt, display_time
+        return match_utc_dt, match_bd_dt
     except Exception:
-        return None, None, None
+        return None, None
 
 def get_my_saved_events():
     token = generate_security_token()
@@ -88,6 +87,7 @@ def get_my_saved_events():
         print("Error fetching saved events:", e)
     return []
 
+# আপনার আগের হুবহু অরিজিনাল লিংক ফরম্যাটার
 def format_links_data(streaming_links):
     formatted = []
     if not streaming_links or not isinstance(streaming_links, list):
@@ -126,54 +126,38 @@ def format_links_data(streaming_links):
             })
     return formatted
 
-def sync_and_auto_add_events():
-    if not FEED_SOURCE:
-        print("Error: SECRET_FEED_SOURCE environment variable is not configured.")
-        return
-
-    my_events = get_my_saved_events()
-    print(f"Total Events currently in Panel: {len(my_events)}")
-
-    try:
-        res = requests.get(FEED_SOURCE, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
-        if res.status_code != 200:
-            print("Feed fetch failed:", res.status_code)
-            return
-        live_feed = res.json()
-    except Exception as e:
-        print("Feed load error:", e)
-        return
-
-    print(f"Total Matches found in Feed: {len(live_feed)}")
-
+# নতুন ম্যাচ অটো-অ্যাড করার ফাংশন (প্রতিবারে সর্বোচ্চ ৫টি)
+def auto_add_new_matches(live_feed, my_events):
     now_bd = datetime.now(BD_TZ)
     now_utc = datetime.now(timezone.utc)
     start_of_today_bd = now_bd.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    updated_count = 0
     added_count = 0
 
     for feed_match in live_feed:
+        if added_count >= MAX_ADD_PER_RUN:
+            break
+
         if not isinstance(feed_match, dict):
             continue
 
-        # ১. স্ট্যাটাস শেষ হওয়া ম্যাচ স্কিপ
+        # খেলা শেষ হওয়া ম্যাচ বাদ
         raw_status = str(feed_match.get("matchStatus") or feed_match.get("status") or "").lower()
         if raw_status in ["live_ended", "finished", "ended"]:
             continue
 
         date_val = feed_match.get("date")
         time_val = feed_match.get("time")
-        match_utc_dt, match_bd_dt, display_time = parse_feed_time_to_bd(date_val, time_val)
+        match_utc_dt, match_bd_dt = parse_feed_time_to_bd(date_val, time_val)
 
         if not match_bd_dt:
             continue
 
-        # ২. আজকের আগের পুরোনো ম্যাচ স্কিপ
+        # আজকের আগের অতীত ম্যাচ বাদ
         if match_bd_dt < start_of_today_bd:
             continue
 
-        # ৩. খেলার সময় পার হয়ে গেলে স্কিপ (ডিলিটের পর যাতে আর ফিরে না আসে)
+        # ডিউরেশন ও খেলার সময় পার হয়ে গেলে বাদ (ডিলিট করা ম্যাচ ফিরে না আসার জন্য)
         duration_min = 135
         if feed_match.get("end_time") and time_val:
             try:
@@ -198,10 +182,9 @@ def sync_and_auto_add_events():
 
         clean_fa = clean_name(t_a_raw)
         clean_fb = clean_name(t_b_raw)
-        clean_ftitle = clean_name(f_title)
 
-        # ৪. প্যানেলে আগে থেকে আছে কি না চেক
-        matched_db_item = None
+        # চেক করা ম্যাচটি অলরেডি প্যানেলে আছে কি না
+        already_exists = False
         for item_db in my_events:
             ev_data = item_db
             if "event" in item_db and isinstance(item_db["event"], str):
@@ -210,102 +193,173 @@ def sync_and_auto_add_events():
                 except Exception:
                     pass
 
-            db_a = clean_name(ev_data.get("teamAName") or item_db.get("teamAName") or ev_data.get("team1"))
-            db_b = clean_name(ev_data.get("teamBName") or item_db.get("teamBName") or ev_data.get("team2"))
-            db_title = clean_name(ev_data.get("eventName") or ev_data.get("tournament") or ev_data.get("title"))
+            db_a = clean_name(ev_data.get("teamAName") or item_db.get("teamAName"))
+            db_b = clean_name(ev_data.get("teamBName") or item_db.get("teamBName"))
 
             both_match = (clean_fa == db_a and clean_fb == db_b) or (clean_fa == db_b and clean_fb == db_a)
-            title_match = clean_ftitle and db_title and (clean_ftitle == db_title)
+            single_strong_a = len(clean_fa) >= 5 and (clean_fa == db_a or clean_fa == db_b)
+            single_strong_b = len(clean_fb) >= 5 and (clean_fb == db_a or clean_fb == db_b)
 
-            if both_match or (title_match and (clean_fa in [db_a, db_b])):
-                matched_db_item = item_db
+            if both_match or (single_strong_a and single_strong_b) or (single_strong_a and not clean_fb):
+                already_exists = True
                 break
 
-        # ৫. ম্যাচ অলরেডি থাকলে -> শুধু স্ট্রিমিং লিঙ্ক আপডেট
-        if matched_db_item:
-            links = feed_match.get("streaming_links") or feed_match.get("links") or []
-            formatted_links = format_links_data(links)
-            if not formatted_links:
-                continue
+        if already_exists:
+            continue
 
-            event_id = matched_db_item.get("id")
-            links_path = str(matched_db_item.get("linksPath") or f"links/{event_id}")
-            event_str = matched_db_item["event"] if ("event" in matched_db_item and isinstance(matched_db_item["event"], str)) else json.dumps(matched_db_item)
+        # নতুন ম্যাচ তৈরি করা
+        logo1 = fix_image_url(feed_match.get("teamAFlag") or feed_match.get("team1_logo"))
+        logo2 = fix_image_url(feed_match.get("teamBFlag") or feed_match.get("team2_logo"))
+        t_logo = fix_image_url(feed_match.get("eventLogo") or feed_match.get("tournament_logo"))
+        category = feed_match.get("category") or "Football"
 
-            payload = {
-                "id": str(event_id),
-                "event": event_str,
-                "linksPath": links_path,
-                "linksData": json.dumps(formatted_links),
-                "requestData": generate_security_token()
-            }
+        unique_slug = f"links/{int(time.time() * 1000)}_{added_count}"
+        end_dt = match_bd_dt + timedelta(minutes=duration_min)
+
+        new_event_dict = {
+            "eventName": f_title,
+            "category": category,
+            "eventLogo": t_logo,
+            "categoryLogo": t_logo,
+            "teamAName": t_a_raw,
+            "teamBName": t_b_raw,
+            "teamAFlag": logo1,
+            "teamBFlag": logo2,
+            "date": match_bd_dt.strftime("%d/%m/%Y"),
+            "time": match_bd_dt.strftime("%H:%M:%S"),
+            "endDate": end_dt.strftime("%d/%m/%Y"),
+            "endTime": end_dt.strftime("%H:%M:%S"),
+            "linksSlug": unique_slug,
+            "linksPath": unique_slug,
+            "visible": True,
+            "hot": False,
+            "priority": 0
+        }
+
+        insert_payload = {
+            "from": "events",
+            "event": json.dumps(new_event_dict),
+            "linksPath": unique_slug,
+            "requestData": generate_security_token()
+        }
+
+        try:
+            in_res = requests.post(BASE_URL + "admin/add_event", json=insert_payload, headers=get_headers(), timeout=12)
+            if in_res.status_code in [200, 201]:
+                added_count += 1
+                print(f"[{added_count}/{MAX_ADD_PER_RUN} Added Match] {t_a_raw} vs {t_b_raw}")
+        except Exception as e:
+            print(f"Error adding {t_a_raw}:", e)
+
+    return added_count
+
+# আপনার আসল স্ক্রিপ্ট অনুযায়ী স্ট্রিমিং লিংক আপডেট ফাংশন
+def sync_streaming_links(live_feed, my_events):
+    indexed_feed = []
+    for f in live_feed:
+        t_a = clean_name(f.get("teamAName") or f.get("teamA") or "")
+        t_b = clean_name(f.get("teamBName") or f.get("teamB") or "")
+        links = f.get("streaming_links") or f.get("links") or []
+
+        if links:
+            indexed_feed.append({
+                "teamA": t_a,
+                "teamB": t_b,
+                "raw_teamA": f.get("teamAName") or f.get("teamA"),
+                "raw_teamB": f.get("teamBName") or f.get("teamB"),
+                "streaming_links": links
+            })
+
+    updated_count = 0
+
+    for item_db in my_events:
+        event_id = item_db.get("id")
+
+        ev_data = item_db
+        if "event" in item_db and isinstance(item_db["event"], str):
             try:
-                up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
-                if up_res.status_code == 200:
-                    print(f"[Updated Links] {t_a_raw} vs {t_b_raw}")
-                    updated_count += 1
-            except Exception as e:
-                print(f"Error updating links for {t_a_raw}:", e)
+                ev_data = json.loads(item_db["event"])
+            except:
+                pass
 
-        # ৬. নতুন ম্যাচ হলে -> অটো অ্যাড (সর্বোচ্চ ৫টি প্রতি রানে)
-        else:
-            if added_count >= MAX_ADD_PER_RUN:
-                continue
+        my_a = clean_name(ev_data.get("teamAName") or item_db.get("teamAName"))
+        my_b = clean_name(ev_data.get("teamBName") or item_db.get("teamBName"))
 
-            links = feed_match.get("streaming_links") or feed_match.get("links") or []
-            formatted_links = format_links_data(links)
+        if not my_a or my_a in ["teama", "livematch"]:
+            continue
 
-            logo1 = fix_image_url(feed_match.get("teamAFlag") or feed_match.get("team1_logo"))
-            logo2 = fix_image_url(feed_match.get("teamBFlag") or feed_match.get("team2_logo"))
-            t_logo = fix_image_url(feed_match.get("eventLogo") or feed_match.get("tournament_logo"))
-            category = feed_match.get("category") or "Football"
+        matched_match = None
+        for inf in indexed_feed:
+            both_match = (my_a == inf["teamA"] and my_b == inf["teamB"]) or (my_a == inf["teamB"] and my_b == inf["teamA"])
+            single_strong_a = len(my_a) >= 5 and (my_a == inf["teamA"] or my_a == inf["teamB"])
+            single_strong_b = len(my_b) >= 5 and (my_b == inf["teamA"] or my_b == inf["teamB"])
 
-            new_event_dict = {
-                "eventName": f_title,
-                "title": f_title,
-                "tournament": f_title,
-                "category": category,
-                "categoryLogo": t_logo,
-                "eventLogo": t_logo,
-                "tournament_logo": t_logo,
-                "teamAName": t_a_raw,
-                "teamBName": t_b_raw,
-                "team1": t_a_raw,
-                "team2": t_b_raw,
-                "teamAFlag": logo1,
-                "teamBFlag": logo2,
-                "logo1": logo1,
-                "logo2": logo2,
-                "time": display_time,
-                "date": match_bd_dt.strftime("%d/%m/%Y"),
-                "duration": str(duration_min),
-                "matchStatus": "upcoming",
-                "visible": True
-            }
+            if both_match or (single_strong_a and single_strong_b) or (single_strong_a and not inf["teamB"]):
+                matched_match = inf
+                break
 
-            insert_payload = {
-                "from": "events",
-                "event": json.dumps(new_event_dict),
-                "linksData": json.dumps(formatted_links),
-                "requestData": generate_security_token()
-            }
+        if not matched_match:
+            continue
 
-            try:
-                in_res = requests.post(BASE_URL + "admin/add_event", json=insert_payload, headers=get_headers(), timeout=12)
-                if in_res.status_code in [200, 201]:
-                    added_count += 1
-                    print(f"[{added_count}/{MAX_ADD_PER_RUN} Added] {t_a_raw} vs {t_b_raw} | {display_time}")
-                else:
-                    print(f"Failed to add {t_a_raw}, status: {in_res.status_code}")
-            except Exception as e:
-                print(f"Error adding {t_a_raw}:", e)
+        formatted_links = format_links_data(matched_match["streaming_links"])
+        if not formatted_links:
+            continue
 
-    print(f"\nExecution Finished -> Added: {added_count} | Links Updated: {updated_count}")
+        links_path = str(item_db.get("linksPath") or ev_data.get("linksPath") or ev_data.get("links") or f"links/{event_id}")
+        event_str = item_db["event"] if ("event" in item_db and isinstance(item_db["event"], str)) else json.dumps(ev_data)
+
+        payload = {
+            "id": str(event_id),
+            "event": event_str,
+            "linksPath": links_path,
+            "linksData": json.dumps(formatted_links),
+            "requestData": generate_security_token()
+        }
+
+        try:
+            up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
+            if up_res.status_code == 200:
+                print(f"[Links Updated] ID: {event_id} | {ev_data.get('teamAName')} vs {ev_data.get('teamBName')} | Links: {len(formatted_links)}")
+                updated_count += 1
+        except Exception as e:
+            print(f"Error updating ID {event_id}:", e)
+
+    return updated_count
+
+def main():
+    if not FEED_SOURCE:
+        print("Error: SECRET_FEED_SOURCE environment variable is not configured.")
+        return
+
+    my_events = get_my_saved_events()
+    print(f"Total Events currently in Panel: {len(my_events)}")
+
+    try:
+        res = requests.get(FEED_SOURCE, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+        if res.status_code != 200:
+            print("Feed fetch failed:", res.status_code)
+            return
+        live_feed = res.json()
+    except Exception as e:
+        print("Feed load error:", e)
+        return
+
+    print(f"Total Matches in Feed: {len(live_feed)}")
+
+    # ১. প্রথমে নতুন ম্যাচগুলো অ্যাড করা (সর্বোচ্চ ৫টি)
+    added = auto_add_new_matches(live_feed, my_events)
+
+    # যদি নতুন ম্যাচ অ্যাড হয়ে থাকে, তবে ডাটাবেস থেকে ফ্রেশ লিস্ট আবার রিড করা
+    if added > 0:
+        time.sleep(1)
+        my_events = get_my_saved_events()
+
+    # ২. আপনার হুবহু আগের নিয়মে সব ম্যাচের স্ট্রিমিং লিংক আপডেট করা
+    updated = sync_streaming_links(live_feed, my_events)
+
+    print(f"\n==========================================")
+    print(f"Summary -> New Matches Added: {added} | Links Updated: {updated}")
+    print(f"==========================================")
 
 if __name__ == "__main__":
-    current_time = datetime.now(BD_TZ).strftime("%I:%M:%S %p")
-    print("==========================================")
-    print(f"Running Sync at {current_time} (BD Time)")
-    print("==========================================")
-    
-    sync_and_auto_add_events()
+    main()
