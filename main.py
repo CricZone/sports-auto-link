@@ -16,7 +16,7 @@ BD_TZ = timezone(timedelta(hours=6))
 # প্রতি রানে সর্বোচ্চ ৫টি নতুন ম্যাচ অ্যাড হবে
 MAX_ADD_PER_RUN = 5
 
-# Finished ট্যাবে সবসময় সাম্প্রতিক ১২টি (১০-১৫ এর ভেতর) ম্যাচ বহাল থাকবে
+# Finished ট্যাবে সবসময় সাম্প্রতিক ১২টি সমাপ্ত ম্যাচ সংরক্ষিত থাকবে
 KEEP_FINISHED_LIMIT = 12
 
 def generate_security_token():
@@ -51,11 +51,11 @@ def fix_image_url(url):
         url = url.replace("api.sofascore.com", "img.sofascore.com")
     return url
 
-# ফিডের আন্তর্জাতিক UTC সময়কে নিখুঁতভাবে বাংলাদেশ সময়ে (+৬ ঘণ্টা) রূপান্তর
+# ফিডের আন্তর্জাতিক UTC সময়কে বাংলাদেশ সময়ে (+৬ ঘণ্টা) রূপান্তর
 def parse_feed_time_to_bd(date_str, time_str):
-    now_bd = datetime.now(BD_TZ)
+    now_dt = datetime.now(BD_TZ)
     if not date_str:
-        return datetime.now(timezone.utc), now_bd
+        return datetime.now(timezone.utc), now_dt
 
     try:
         date_str = str(date_str).strip()
@@ -68,24 +68,28 @@ def parse_feed_time_to_bd(date_str, time_str):
             else:
                 day, month, year = parts[0], parts[1], parts[2]
         else:
-            return datetime.now(timezone.utc), now_bd
+            return datetime.now(timezone.utc), now_dt
 
         t_parts = [int(p) for p in re.findall(r'\d+', time_str)]
         hh = t_parts[0] if len(t_parts) > 0 else 0
         mm = t_parts[1] if len(t_parts) > 1 else 0
         ss = t_parts[2] if len(t_parts) > 2 else 0
 
+        # ফিডের সময়কে UTC ধরে বাংলাদেশ সময়ে রূপান্তর
         match_utc_dt = datetime(year, month, day, hh, mm, ss, tzinfo=timezone.utc)
         match_bd_dt = match_utc_dt.astimezone(BD_TZ)
         return match_utc_dt, match_bd_dt
     except Exception:
-        return datetime.now(timezone.utc), now_bd
+        return datetime.now(timezone.utc), now_dt
 
-# ডাটাবেসে সেভ থাকা বাংলাদেশ সময় রিড করা
+# ডাটাবেসে সেভ থাকা বাংলাদেশ সময় রিড করার ফাংশন
 def parse_saved_bd_dt(date_str, time_str):
+    if not date_str:
+        return None
     try:
         date_str = str(date_str).strip()
         time_str = str(time_str).strip() if time_str else "00:00:00"
+
         parts = [int(p) for p in re.findall(r'\d+', date_str)]
         if len(parts) >= 3:
             if parts[0] > 1000:
@@ -103,7 +107,7 @@ def parse_saved_bd_dt(date_str, time_str):
         lower_t = time_str.lower()
         if "pm" in lower_t and hh < 12:
             hh += 12
-        if "am" in lower_t and hh == 12:
+        elif "am" in lower_t and hh == 12:
             hh = 0
 
         return datetime(y, m, d, hh, mm, ss, tzinfo=BD_TZ)
@@ -125,7 +129,9 @@ def get_my_saved_events():
         print("Error fetching saved events:", e)
     return []
 
-# ১. ডুপ্লিকেট ম্যাচ অটো-রিমুভার
+# -------------------------------------------------------------
+# ডুপ্লিকেট ম্যাচ অটো-রিমুভার
+# -------------------------------------------------------------
 def remove_duplicate_events_step(my_events):
     seen = {}
     deleted_dup = 0
@@ -171,7 +177,9 @@ def remove_duplicate_events_step(my_events):
 
     return deleted_dup
 
-# ২. Finished ট্যাবে সাম্প্রতিক ১২টি ম্যাচ রেখে অতিরিক্ত পুরোনো ম্যাচ ডিলিট
+# -------------------------------------------------------------
+# Finished ট্যাবে সবসময় ১০-১২টি ম্যাচ রেখে পুরোনো ম্যাচ ডিলিট
+# -------------------------------------------------------------
 def delete_expired_events_step(my_events):
     now_bd = datetime.now(BD_TZ)
     finished_list = []
@@ -206,7 +214,7 @@ def delete_expired_events_step(my_events):
         else:
             end_dt = match_dt + timedelta(minutes=duration_min)
 
-        # খেলা শেষ হয়ে থাকলে ফিনিশড তালিকায় জমা করা
+        # খেলা শেষ হয়ে থাকলে Finished তালিকায় রাখা
         if end_dt < now_bd:
             finished_list.append({
                 "id": event_id,
@@ -215,10 +223,10 @@ def delete_expired_events_step(my_events):
                 "t_b": ev_data.get("teamBName") or item_db.get("teamBName") or ""
             })
 
-    # শেষ হওয়া ম্যাচগুলোকে নতুন থেকে পুরোনো ক্রমানুসারে সাজানো
+    # শেষ হওয়া ম্যাচগুলোকে নতুন থেকে পুরোনোর ক্রমানুসারে সাজানো
     finished_list.sort(key=lambda x: x["end_dt"], reverse=True)
 
-    # সাম্প্রতিক ১২টি রেখে অতিরিক্ত পুরোনো ম্যাচগুলো ডিলিট করা
+    # সাম্প্রতিক ১২টি রেখে অতিরিক্ত পুরোনো ম্যাচগুলো ডিলিট
     to_delete = finished_list[KEEP_FINISHED_LIMIT:]
     deleted_count = 0
 
@@ -276,7 +284,9 @@ def format_links_data(streaming_links):
             })
     return formatted
 
-# ৩. নতুন ম্যাচ বাংলাদেশ সময়ে (২৪ ঘণ্টার ফরম্যাটে) যোগ করা
+# -------------------------------------------------------------
+# নতুন ম্যাচ অ্যাড করা (বাংলাদেশ সময়ে রূপান্তর করে)
+# -------------------------------------------------------------
 def add_new_events_step(live_feed, my_events):
     now_bd = datetime.now(BD_TZ)
     now_utc = datetime.now(timezone.utc)
@@ -299,7 +309,7 @@ def add_new_events_step(live_feed, my_events):
         if match_bd_dt < start_of_today_bd:
             continue
 
-        # শুধুমাত্র আজকের বা পেছনের দিনের খেলা live_ended হলে বাদ দেবে
+        # আজকের পেছনের খেলা live_ended হলে বাদ
         raw_status = str(feed_match.get("matchStatus") or feed_match.get("status") or "").lower()
         if match_utc_dt <= now_utc and raw_status in ["live_ended", "finished", "ended"]:
             continue
@@ -369,7 +379,7 @@ def add_new_events_step(live_feed, my_events):
         unique_slug = f"links/{int(time.time() * 1000)}_{added_count}"
         end_dt = match_bd_dt + timedelta(minutes=duration_min)
 
-        # অ্যাপের জন্য পারফেক্ট ২৪ ঘণ্টার ফরম্যাট (%H:%M:%S)
+        # স্ট্যান্ডার্ড ২৪ ঘণ্টার HH:MM:SS ফরম্যাট
         new_event_dict = {
             "visible": True,
             "isHot": False,
@@ -409,7 +419,7 @@ def add_new_events_step(live_feed, my_events):
                 in_res = requests.post(BASE_URL + "admin/add_event", json=insert_payload, headers=get_headers(), timeout=15)
                 if in_res.status_code in [200, 201]:
                     added_count += 1
-                    print(f"[Added Event {added_count}/{MAX_ADD_PER_RUN}] {t_a_raw} vs {t_b_raw} | BD Time: {match_bd_dt.strftime('%H:%M:%S')}")
+                    print(f"[Added Event {added_count}/{MAX_ADD_PER_RUN}] {t_a_raw} vs {t_b_raw} | Time: {match_bd_dt.strftime('%d/%m/%Y %H:%M:%S')}")
                     my_events.append(new_event_dict)
                     success = True
                     time.sleep(2.5)
@@ -424,19 +434,21 @@ def add_new_events_step(live_feed, my_events):
 
     return added_count
 
-# ৪. ডাটাবেসে থাকা সব ম্যাচের ভুল সময় ও স্ট্রিমিং লিঙ্ক সিঙ্ক করা
+# -------------------------------------------------------------
+# স্ট্রিমিং লিঙ্ক ও বাংলাদেশ সময় সিঙ্ক করা
+# -------------------------------------------------------------
 def sync_streaming_links_step(live_feed, my_events):
     indexed_feed = []
     for f in live_feed:
         t_a = clean_name(f.get("teamAName") or f.get("teamA") or "")
         t_b = clean_name(f.get("teamBName") or f.get("teamB") or "")
-        title = clean_name(f.get("eventName") or f.get("name") or "")
         links = f.get("streaming_links") or f.get("links") or []
 
         indexed_feed.append({
             "teamA": t_a,
             "teamB": t_b,
-            "title": title,
+            "raw_teamA": f.get("teamAName") or f.get("teamA"),
+            "raw_teamB": f.get("teamBName") or f.get("teamB"),
             "streaming_links": links,
             "raw_feed": f
         })
@@ -455,44 +467,31 @@ def sync_streaming_links_step(live_feed, my_events):
 
         my_a = clean_name(ev_data.get("teamAName") or item_db.get("teamAName"))
         my_b = clean_name(ev_data.get("teamBName") or item_db.get("teamBName"))
-        my_title = clean_name(ev_data.get("eventName") or ev_data.get("tournament") or ev_data.get("title"))
+
+        if not my_a or my_a in ["teama", "livematch"]:
+            continue
 
         matched_match = None
         for inf in indexed_feed:
-            both_match = my_a and my_b and ((my_a == inf["teamA"] and my_b == inf["teamB"]) or (my_a == inf["teamB"] and my_b == inf["teamA"]))
-            title_match = my_title and inf["title"] and my_title == inf["title"]
+            both_match = (my_a == inf["teamA"] and my_b == inf["teamB"]) or (my_a == inf["teamB"] and my_b == inf["teamA"])
+            single_strong_a = len(my_a) >= 5 and (my_a == inf["teamA"] or my_a == inf["teamB"])
+            single_strong_b = len(my_b) >= 5 and (my_b == inf["teamA"] or my_b == inf["teamB"])
 
-            if both_match or title_match:
+            if both_match or (single_strong_a and single_strong_b) or (single_strong_a and not inf["teamB"]):
                 matched_match = inf
                 break
 
         if not matched_match:
             continue
 
+        # বাংলাদেশ সময়ে সময় আপডেট (যদি আগে ভুল UTC সেভ থাকে)
         f_obj = matched_match["raw_feed"]
         _, correct_bd_dt = parse_feed_time_to_bd(f_obj.get("date"), f_obj.get("time"))
-        
-        duration_min = 135
-        if f_obj.get("end_time") and f_obj.get("time"):
-            try:
-                s_parts = [int(p) for p in re.findall(r'\d+', f_obj["time"])]
-                e_parts = [int(p) for p in re.findall(r'\d+', f_obj["end_time"])]
-                s_m = s_parts[0] * 60 + s_parts[1]
-                e_m = e_parts[0] * 60 + e_parts[1]
-                if e_m < s_m:
-                    e_m += 24 * 60
-                if e_m - s_m > 0:
-                    duration_min = e_m - s_m
-            except Exception:
-                pass
+        correct_time_str = correct_bd_dt.strftime("%H:%M:%S")
+        correct_date_str = correct_bd_dt.strftime("%d/%m/%Y")
 
-        correct_end_bd_dt = correct_bd_dt + timedelta(minutes=duration_min)
-
-        # ডাটাবেসের পুরোনো ভুল সময়কে বদলে সঠিক বাংলাদেশ সময়ে আপডেট
-        ev_data["date"] = correct_bd_dt.strftime("%d/%m/%Y")
-        ev_data["time"] = correct_bd_dt.strftime("%H:%M:%S")
-        ev_data["end_date"] = correct_end_bd_dt.strftime("%d/%m/%Y")
-        ev_data["end_time"] = correct_end_bd_dt.strftime("%H:%M:%S")
+        ev_data["time"] = correct_time_str
+        ev_data["date"] = correct_date_str
 
         formatted_links = format_links_data(matched_match["streaming_links"])
         links_path = str(item_db.get("linksPath") or ev_data.get("linksPath") or ev_data.get("links") or f"links/{event_id}")
@@ -508,9 +507,8 @@ def sync_streaming_links_step(live_feed, my_events):
         try:
             up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
             if up_res.status_code == 200:
-                print(f"[Updated BD Time] ID: {event_id} | {ev_data.get('teamAName')} vs {ev_data.get('teamBName')} | Time: {ev_data['time']}")
+                print(f"[Updated Links & BD Time] ID: {event_id} | {ev_data.get('teamAName')} vs {ev_data.get('teamBName')} | Time: {correct_date_str} {correct_time_str}")
                 updated_count += 1
-                time.sleep(1.0)
         except Exception as e:
             print(f"Error updating ID {event_id}:", e)
 
@@ -524,13 +522,13 @@ def main():
     my_events = get_my_saved_events()
     print(f"Total Events currently in Panel: {len(my_events)}")
 
-    # ১. ডুপ্লিকেট ম্যাচ ডিলিট
+    # ১. ডুপ্লিকেট ম্যাচ পরিষ্কার করা
     dup_removed = remove_duplicate_events_step(my_events)
     if dup_removed > 0:
         time.sleep(2)
         my_events = get_my_saved_events()
 
-    # ২. Finished ট্যাবের জন্য সাম্প্রতিক ১২টি রেখে অতিরিক্ত পুরোনো ম্যাচ ডিলিট
+    # ২. Finished ট্যাবে সাম্প্রতিক ১২টি রেখে অতিরিক্ত পুরোনো ম্যাচগুলো অটো-ডিলিট করা
     deleted = delete_expired_events_step(my_events)
     if deleted > 0:
         time.sleep(2)
@@ -548,19 +546,19 @@ def main():
 
     print(f"Total Matches found in Feed: {len(live_feed)}")
 
-    # ৩. নতুন ম্যাচ অ্যাড করা (বাংলাদেশ সময়ে)
+    # ৩. নতুন ম্যাচ সর্বোচ্চ ৫টি করে অ্যাড করা
     added = add_new_events_step(live_feed, my_events)
 
-    # ৪. ডাটাবেস রিফ্রেশ
+    # ৪. ডাটাবেস রিফ্রেশ করা
     if added > 0:
         time.sleep(2)
         my_events = get_my_saved_events()
 
-    # ৫. ডাটাবেসে থাকা আগের সব ম্যাচের সময় ও লিঙ্ক সিঙ্ক করা
-    synced = sync_streaming_links_step(live_feed, my_events)
+    # ৫. স্ট্রিমিং লিঙ্ক ও বাংলাদেশ সময় সিঙ্ক করা
+    updated = sync_streaming_links_step(live_feed, my_events)
 
     print("\n==========================================")
-    print(f"Finished! Duplicates: {dup_removed} | Expired Deleted: {deleted} | Added: {added} | Synced/Fixed: {synced}")
+    print(f"Finished! Duplicates Removed: {dup_removed} | Expired Deleted: {deleted} | Added: {added} | Synced: {updated}")
     print("==========================================")
 
 if __name__ == "__main__":
