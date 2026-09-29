@@ -13,7 +13,7 @@ FEED_SOURCE = os.getenv("SECRET_FEED_SOURCE", "")
 # বাংলাদেশ টাইমজোন (UTC+6)
 BD_TZ = timezone(timedelta(hours=6))
 
-# প্রতি রানে সর্বোচ্চ ৫টি নতুন ম্যাচ অ্যাড হবে
+# প্রতি ৫ মিনিটে সর্বোচ্চ ৫টি নতুন ম্যাচ অ্যাড হবে
 MAX_ADD_PER_RUN = 5
 
 def generate_security_token():
@@ -92,6 +92,68 @@ def get_my_saved_events():
         print("Error fetching saved events:", e)
     return []
 
+# -------------------------------------------------------------
+# অটো-ডিলিট ফাংশন (খেলা শেষ হয়ে যাওয়া এবং অতীত ম্যাচ মোছা)
+# -------------------------------------------------------------
+def delete_expired_events_step(my_events):
+    now_bd = datetime.now(BD_TZ)
+    start_of_today_bd = now_bd.replace(hour=0, minute=0, second=0, microsecond=0)
+    deleted_count = 0
+
+    for item_db in my_events:
+        event_id = item_db.get("id")
+        if not event_id:
+            continue
+
+        ev_data = item_db
+        if "event" in item_db and isinstance(item_db["event"], str):
+            try:
+                ev_data = json.loads(item_db["event"])
+            except Exception:
+                pass
+
+        date_str = ev_data.get("date") or item_db.get("date")
+        time_str = ev_data.get("time") or item_db.get("time")
+        if not date_str:
+            continue
+
+        _, match_bd_dt = parse_feed_time_to_bd(date_str, time_str)
+
+        end_date_str = ev_data.get("end_date") or item_db.get("end_date")
+        end_time_str = ev_data.get("end_time") or item_db.get("end_time")
+
+        is_expired = False
+        # ১. ২৮/০৯/২০২৬ বা তার আগের সব অতীত ম্যাচ ডিলিট
+        if match_bd_dt < start_of_today_bd:
+            is_expired = True
+        # ২. আজকের ম্যাচ কিন্তু খেলার নির্ধারিত শেষ সময় পার হয়ে গেছে
+        elif end_date_str and end_time_str:
+            _, end_bd_dt = parse_feed_time_to_bd(end_date_str, end_time_str)
+            if end_bd_dt < now_bd:
+                is_expired = True
+        else:
+            # ডিফল্ট ১৩৫ মিনিট পর খেলা শেষ ধরে ডিলিট
+            if match_bd_dt + timedelta(minutes=135) < now_bd:
+                is_expired = True
+
+        if is_expired:
+            del_payload = {
+                "id": int(event_id) if str(event_id).isdigit() else str(event_id),
+                "requestData": generate_security_token()
+            }
+            try:
+                del_res = requests.post(BASE_URL + "admin/delete_event", json=del_payload, headers=get_headers(), timeout=12)
+                if del_res.status_code in [200, 201]:
+                    deleted_count += 1
+                    t_a = ev_data.get("teamAName") or item_db.get("teamAName") or "Event"
+                    t_b = ev_data.get("teamBName") or item_db.get("teamBName") or ""
+                    print(f"[Auto Deleted] ID: {event_id} | {t_a} vs {t_b}")
+                    time.sleep(1.5)
+            except Exception as e:
+                print(f"Error deleting event {event_id}:", e)
+
+    return deleted_count
+
 def format_links_data(streaming_links):
     formatted = []
     if not streaming_links or not isinstance(streaming_links, list):
@@ -144,17 +206,21 @@ def add_new_events_step(live_feed, my_events):
         if not isinstance(feed_match, dict):
             continue
 
-        raw_status = str(feed_match.get("matchStatus") or feed_match.get("status") or "").lower()
-        if raw_status in ["live_ended", "finished", "ended"]:
-            continue
-
         date_val = feed_match.get("date")
         time_val = feed_match.get("time")
         match_utc_dt, match_bd_dt = parse_feed_time_to_bd(date_val, time_val)
 
+        # ১. ২৮/০৯/২০২৬ বা তার আগের সব অতীত ম্যাচ বাদ
         if match_bd_dt < start_of_today_bd:
             continue
 
+        # ২. শুধুমাত্র আজকের বা পেছনের দিনের খেলা live_ended হলে বাদ দেবে। 
+        # ভবিষ্যতের দিনের ম্যাচ হলে (যেমন Argentina vs Bolivia) ফিডের ভুল live_ended উপেক্ষা করে অ্যাড করবে।
+        raw_status = str(feed_match.get("matchStatus") or feed_match.get("status") or "").lower()
+        if match_utc_dt <= now_utc and raw_status in ["live_ended", "finished", "ended"]:
+            continue
+
+        # ৩. খেলার নির্ধারিত সময় শেষ হলে বাদ
         duration_min = 135
         if feed_match.get("end_time") and time_val:
             try:
@@ -184,6 +250,7 @@ def add_new_events_step(live_feed, my_events):
         if not clean_fa and not clean_ftitle:
             continue
 
+        # ৪. শুধুমাত্র টিম নাম দিয়ে ডুপ্লিকেট যাচাই
         already_exists = False
         for item_db in my_events:
             ev_data = item_db
@@ -195,18 +262,14 @@ def add_new_events_step(live_feed, my_events):
 
             db_a = clean_name(ev_data.get("teamAName") or item_db.get("teamAName") or ev_data.get("team1"))
             db_b = clean_name(ev_data.get("teamBName") or item_db.get("teamBName") or ev_data.get("team2"))
-            db_title = clean_name(ev_data.get("eventName") or ev_data.get("tournament") or ev_data.get("title"))
 
             if clean_fa and clean_fb and db_a and db_b:
                 if (clean_fa == db_a and clean_fb == db_b) or (clean_fa == db_b and clean_fb == db_a):
                     already_exists = True
                     break
-
-            if clean_ftitle and db_title and clean_ftitle == db_title:
-                if clean_fa and (clean_fa == db_a or clean_fa == db_b):
-                    already_exists = True
-                    break
-                if not clean_fb:
+            elif not clean_fb and not db_b:
+                db_title = clean_name(ev_data.get("eventName") or ev_data.get("tournament") or ev_data.get("title"))
+                if clean_ftitle and db_title and clean_ftitle == db_title:
                     already_exists = True
                     break
 
@@ -256,17 +319,25 @@ def add_new_events_step(live_feed, my_events):
             "requestData": generate_security_token()
         }
 
-        try:
-            in_res = requests.post(BASE_URL + "admin/add_event", json=insert_payload, headers=get_headers(), timeout=12)
-            if in_res.status_code in [200, 201]:
-                added_count += 1
-                print(f"[Added Event {added_count}/{MAX_ADD_PER_RUN}] {t_a_raw} vs {t_b_raw} | Links: {len(formatted_links)}")
-                # Git Commit সম্পূর্ণ হওয়ার জন্য ২.৫ সেকেন্ড বিরতি
-                time.sleep(2.5)
-            else:
-                time.sleep(1)
-        except Exception as e:
-            print(f"Error adding {t_a_raw}:", e)
+        # গিটহাব ফাইল রাইট কনফ্লিক্ট এড়াতে অটো-রিট্রাই ব্যবস্থা
+        success = False
+        for attempt in range(3):
+            try:
+                insert_payload["requestData"] = generate_security_token()
+                in_res = requests.post(BASE_URL + "admin/add_event", json=insert_payload, headers=get_headers(), timeout=15)
+                if in_res.status_code in [200, 201]:
+                    added_count += 1
+                    print(f"[Added Event {added_count}/{MAX_ADD_PER_RUN}] {t_a_raw} vs {t_b_raw} | Links: {len(formatted_links)}")
+                    success = True
+                    time.sleep(2.5)  # ফাইল রাইট সম্পন্ন হওয়ার নিরাপদ বিরতি
+                    break
+                else:
+                    time.sleep(2.0)
+            except Exception:
+                time.sleep(2.0)
+
+        if not success:
+            print(f"[Skipped/Failed] {t_a_raw} vs {t_b_raw}")
 
     return added_count
 
@@ -350,6 +421,12 @@ def main():
     my_events = get_my_saved_events()
     print(f"Total Events currently in Panel: {len(my_events)}")
 
+    # ১. অতীত এবং শেষ হয়ে যাওয়া ম্যাচগুলো আগে অটো-ডিলিট করা
+    deleted = delete_expired_events_step(my_events)
+    if deleted > 0:
+        time.sleep(2)
+        my_events = get_my_saved_events()
+
     try:
         res = requests.get(FEED_SOURCE, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
         if res.status_code != 200:
@@ -362,19 +439,19 @@ def main():
 
     print(f"Total Matches found in Feed: {len(live_feed)}")
 
-    # ১. নতুন ম্যাচ ৫টি অ্যাড করা
+    # ২. নতুন ম্যাচ সর্বোচ্চ ৫টি করে অ্যাড করা
     added = add_new_events_step(live_feed, my_events)
 
-    # ২. ডাটাবেস রিফ্রেশ
+    # ৩. নতুন ম্যাচ অ্যাড হলে ডাটাবেস রিফ্রেশ করা
     if added > 0:
         time.sleep(2)
         my_events = get_my_saved_events()
 
-    # ৩. সব ম্যাচের লিংক সিঙ্ক
+    # ৪. সব ম্যাচের স্ট্রিমিং লিঙ্ক সিঙ্ক করা
     updated = sync_streaming_links_step(live_feed, my_events)
 
     print("\n==========================================")
-    print(f"Finished! Added: {added} | Links Updated: {updated}")
+    print(f"Finished! Deleted: {deleted} | Added: {added} | Links Updated: {updated}")
     print("==========================================")
 
 if __name__ == "__main__":
