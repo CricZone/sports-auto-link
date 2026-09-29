@@ -10,13 +10,10 @@ import requests
 BASE_URL = "https://dlsports.proapp.workers.dev/"
 FEED_SOURCE = os.getenv("SECRET_FEED_SOURCE", "")
 
-# বাংলাদেশ টাইমজোন (UTC+6)
-BD_TZ = timezone(timedelta(hours=6))
+# আপকামিং ম্যাচ প্রতি রানে ধাপে ধাপে অ্যাড হওয়ার সীমা
+MAX_UPCOMING_ADD_PER_RUN = 6
 
-# আপকামিং ম্যাচ আস্তে আস্তে অ্যাড হওয়ার সীমা
-MAX_UPCOMING_ADD_PER_RUN = 5
-
-# Finished ট্যাবে সবসময় সাম্প্রতিক ১২টি সমাপ্ত ম্যাচ সংরক্ষিত থাকবে
+# Finished ট্যাবে সবসময় সাম্প্রতিক ১২টি সমাপ্ত ম্যাচ থাকবে
 KEEP_FINISHED_LIMIT = 12
 
 def generate_security_token():
@@ -51,11 +48,11 @@ def fix_image_url(url):
         url = url.replace("api.sofascore.com", "img.sofascore.com")
     return url
 
-# আন্তর্জাতিক UTC সময়কে নির্ভুল বাংলাদেশ সময়ে (+৬ ঘণ্টা) রূপান্তর
-def parse_feed_time_to_bd(date_str, time_str):
-    now_bd = datetime.now(BD_TZ)
+# ফিডের আন্তর্জাতিক UTC সময় পার্সার
+def parse_feed_utc_dt(date_str, time_str):
+    now_utc = datetime.now(timezone.utc)
     if not date_str:
-        return datetime.now(timezone.utc), now_bd
+        return now_utc
 
     try:
         date_str = str(date_str).strip()
@@ -68,21 +65,19 @@ def parse_feed_time_to_bd(date_str, time_str):
             else:
                 day, month, year = parts[0], parts[1], parts[2]
         else:
-            return datetime.now(timezone.utc), now_bd
+            return now_utc
 
         t_parts = [int(p) for p in re.findall(r'\d+', time_str)]
         hh = t_parts[0] if len(t_parts) > 0 else 0
         mm = t_parts[1] if len(t_parts) > 1 else 0
         ss = t_parts[2] if len(t_parts) > 2 else 0
 
-        match_utc_dt = datetime(year, month, day, hh, mm, ss, tzinfo=timezone.utc)
-        match_bd_dt = match_utc_dt.astimezone(BD_TZ)
-        return match_utc_dt, match_bd_dt
+        return datetime(year, month, day, hh, mm, ss, tzinfo=timezone.utc)
     except Exception:
-        return datetime.now(timezone.utc), now_bd
+        return now_utc
 
-# ডাটাবেসে সেভ থাকা সময় পার্স করার ফাংশন
-def parse_saved_bd_dt(date_str, time_str):
+# ডাটাবেসে সেভ থাকা UTC সময় পার্সার
+def parse_saved_utc_dt(date_str, time_str):
     if not date_str:
         return None
     try:
@@ -109,7 +104,7 @@ def parse_saved_bd_dt(date_str, time_str):
         elif "am" in lower_t and hh == 12:
             hh = 0
 
-        return datetime(y, m, d, hh, mm, ss, tzinfo=BD_TZ)
+        return datetime(y, m, d, hh, mm, ss, tzinfo=timezone.utc)
     except Exception:
         return None
 
@@ -176,7 +171,7 @@ def remove_duplicate_events_step(my_events):
 
 # ২. Finished ট্যাবে ১০-১২টি সমাপ্ত ম্যাচ রেখে অতিরিক্তগুলো মুছে ফেলা
 def manage_finished_events_step(my_events):
-    now_bd = datetime.now(BD_TZ)
+    now_utc = datetime.now(timezone.utc)
     finished_list = []
 
     for item_db in my_events:
@@ -196,7 +191,7 @@ def manage_finished_events_step(my_events):
         if not date_str:
             continue
 
-        match_dt = parse_saved_bd_dt(date_str, time_str)
+        match_dt = parse_saved_utc_dt(date_str, time_str)
         if not match_dt:
             continue
 
@@ -205,11 +200,11 @@ def manage_finished_events_step(my_events):
         end_date_str = ev_data.get("end_date") or item_db.get("end_date")
 
         if end_date_str and end_time_str:
-            end_dt = parse_saved_bd_dt(end_date_str, end_time_str) or (match_dt + timedelta(minutes=duration_min))
+            end_dt = parse_saved_utc_dt(end_date_str, end_time_str) or (match_dt + timedelta(minutes=duration_min))
         else:
             end_dt = match_dt + timedelta(minutes=duration_min)
 
-        if end_dt < now_bd:
+        if end_dt < now_utc:
             finished_list.append({
                 "id": event_id,
                 "end_dt": end_dt,
@@ -279,7 +274,7 @@ def format_links_data(streaming_links):
 
 # ৩. লাইভ ম্যাচ আগে এবং এরপর আপকামিং ম্যাচ ক্রমান্বয়ে অ্যাড করা
 def add_events_step(live_feed, my_events):
-    now_bd = datetime.now(BD_TZ)
+    now_utc = datetime.now(timezone.utc)
 
     live_candidates = []
     upcoming_candidates = []
@@ -290,7 +285,7 @@ def add_events_step(live_feed, my_events):
 
         date_val = feed_match.get("date")
         time_val = feed_match.get("time")
-        _, match_bd_dt = parse_feed_time_to_bd(date_val, time_val)
+        match_utc_dt = parse_feed_utc_dt(date_val, time_val)
 
         duration_min = 135
         if feed_match.get("end_time") and time_val:
@@ -304,7 +299,7 @@ def add_events_step(live_feed, my_events):
             except Exception:
                 pass
 
-        match_end_bd = match_bd_dt + timedelta(minutes=duration_min)
+        match_end_utc = match_utc_dt + timedelta(minutes=duration_min)
 
         t_a_raw = feed_match.get("teamAName") or feed_match.get("teamA") or feed_match.get("team1") or ""
         t_b_raw = feed_match.get("teamBName") or feed_match.get("teamB") or feed_match.get("team2") or ""
@@ -317,6 +312,7 @@ def add_events_step(live_feed, my_events):
         if not clean_fa and not clean_ftitle:
             continue
 
+        # ডাটাবেসে ইতিমধ্যে আছে কি না চেক
         already_exists = False
         for item_db in my_events:
             ev_data = item_db
@@ -340,24 +336,24 @@ def add_events_step(live_feed, my_events):
         if already_exists:
             continue
 
-        item_tuple = (feed_match, match_bd_dt, match_end_bd, duration_min, t_a_raw, t_b_raw, f_title)
+        item_tuple = (feed_match, match_utc_dt, match_end_utc, duration_min, t_a_raw, t_b_raw, f_title)
 
-        # ১. এই মুহূর্তে লাইভ চলছে এমন খেলা
-        if match_bd_dt <= now_bd <= match_end_bd:
+        # ১. ম্যাচটি কি এই মুহূর্তে লাইভ?
+        if match_utc_dt <= now_utc <= match_end_utc:
             live_candidates.append(item_tuple)
-        # ২. ভবিষ্যতে শুরু হবে এমন খেলা
-        elif match_bd_dt > now_bd:
+        # ২. ম্যাচটি কি ভবিষ্যতে শুরু হবে (আসন্ন)?
+        elif match_utc_dt > now_utc:
             upcoming_candidates.append(item_tuple)
 
     upcoming_candidates.sort(key=lambda x: x[1])
 
     to_add_list = []
     to_add_list.extend(live_candidates)  # সব চলমান লাইভ ম্যাচ আগে অ্যাড হবে
-    to_add_list.extend(upcoming_candidates[:MAX_UPCOMING_ADD_PER_RUN])  # এরপর ৫টি আপকামিং ম্যাচ
+    to_add_list.extend(upcoming_candidates[:MAX_UPCOMING_ADD_PER_RUN])  # এরপর আপকামিং ম্যাচ
 
     added_count = 0
 
-    for feed_match, match_bd_dt, match_end_bd, duration_min, t_a_raw, t_b_raw, f_title in to_add_list:
+    for feed_match, match_utc_dt, match_end_utc, duration_min, t_a_raw, t_b_raw, f_title in to_add_list:
         links = feed_match.get("streaming_links") or feed_match.get("links") or []
         formatted_links = format_links_data(links)
 
@@ -368,11 +364,11 @@ def add_events_step(live_feed, my_events):
 
         unique_slug = f"links/{int(time.time() * 1000)}_{added_count}"
 
-        # স্ট্যান্ডার্ড ২৪ ঘণ্টার HH:mm:ss ফরম্যাট (অ্যাপ কোনোভাবেই ক্র্যাশ করবে না)
-        bd_time_str = match_bd_dt.strftime("%H:%M:%S")
-        bd_date_str = match_bd_dt.strftime("%d/%m/%Y")
-        bd_end_time_str = match_end_bd.strftime("%H:%M:%S")
-        bd_end_date_str = match_end_bd.strftime("%d/%m/%Y")
+        # স্ট্যান্ডার্ড UTC ফরম্যাট (অ্যাপ নিজে থেকে BD টাইম করে নেবে)
+        utc_time_str = match_utc_dt.strftime("%H:%M:%S")
+        utc_date_str = match_utc_dt.strftime("%d/%m/%Y")
+        utc_end_time_str = match_end_utc.strftime("%H:%M:%S")
+        utc_end_date_str = match_end_utc.strftime("%d/%m/%Y")
 
         new_event_dict = {
             "visible": True,
@@ -385,14 +381,14 @@ def add_events_step(live_feed, my_events):
             "teamBName": t_b_raw,
             "teamAFlag": logo1,
             "teamBFlag": logo2,
-            "date": bd_date_str,
-            "time": bd_time_str,
+            "date": utc_date_str,
+            "time": utc_time_str,
             "notiThumb": "",
             "countryCodes": "",
             "whitelistCountryCodes": "",
             "messages": "{}",
-            "end_date": bd_end_date_str,
-            "end_time": bd_end_time_str,
+            "end_date": utc_end_date_str,
+            "end_time": utc_end_time_str,
             "links": unique_slug
         }
 
@@ -413,8 +409,8 @@ def add_events_step(live_feed, my_events):
                 in_res = requests.post(BASE_URL + "admin/add_event", json=insert_payload, headers=get_headers(), timeout=15)
                 if in_res.status_code in [200, 201]:
                     added_count += 1
-                    lbl = "🔴 LIVE" if match_bd_dt <= now_bd <= match_end_bd else "UPCOMING"
-                    print(f"[{lbl} Added {added_count}] {t_a_raw} vs {t_b_raw} | Time: {bd_date_str} {bd_time_str}")
+                    lbl = "🔴 LIVE" if match_utc_dt <= now_utc <= match_end_utc else "UPCOMING"
+                    print(f"[{lbl} Added {added_count}] {t_a_raw} vs {t_b_raw} | UTC Time: {utc_date_str} {utc_time_str}")
                     my_events.append(new_event_dict)
                     success = True
                     time.sleep(1.8)
@@ -426,9 +422,8 @@ def add_events_step(live_feed, my_events):
 
     return added_count
 
-# ৪. ডাটাবেসে সেভ থাকা আগের ম্যাচগুলোর সময় ও লিঙ্ক সিঙ্ক (ক্র্যাশ দূরীকরণ)
-def sync_streaming_links_and_force_bd_time(live_feed, my_events):
-    now_bd = datetime.now(BD_TZ)
+# ৪. ডাটাবেসে সেভ থাকা আগের ম্যাচগুলোর সময় অরিজিনাল UTC-তে রিসেট করা
+def sync_streaming_links_and_reset_utc_time(live_feed, my_events):
     indexed_feed = []
 
     for f in live_feed:
@@ -475,7 +470,7 @@ def sync_streaming_links_and_force_bd_time(live_feed, my_events):
             continue
 
         f_obj = matched_match["raw_feed"]
-        _, correct_bd_dt = parse_feed_time_to_bd(f_obj.get("date"), f_obj.get("time"))
+        correct_utc_dt = parse_feed_utc_dt(f_obj.get("date"), f_obj.get("time"))
 
         duration_min = 135
         if f_obj.get("end_time") and f_obj.get("time"):
@@ -488,13 +483,13 @@ def sync_streaming_links_and_force_bd_time(live_feed, my_events):
                 if e_m - s_m > 0: duration_min = e_m - s_m
             except Exception: pass
 
-        end_bd_dt = correct_bd_dt + timedelta(minutes=duration_min)
+        end_utc_dt = correct_utc_dt + timedelta(minutes=duration_min)
 
-        # অ্যাপের ক্র্যাশ ফিক্স করতে স্ট্যান্ডার্ড HH:mm:ss ফরম্যাট
-        correct_time_str = correct_bd_dt.strftime("%H:%M:%S")
-        correct_date_str = correct_bd_dt.strftime("%d/%m/%Y")
-        correct_end_time = end_bd_dt.strftime("%H:%M:%S")
-        correct_end_date = end_bd_dt.strftime("%d/%m/%Y")
+        # অরিজিনাল UTC সময় ফিরিয়ে দেওয়া যাতে অ্যাপ সঠিক +৬ ঘণ্টা যোগ করে
+        correct_time_str = correct_utc_dt.strftime("%H:%M:%S")
+        correct_date_str = correct_utc_dt.strftime("%d/%m/%Y")
+        correct_end_time = end_utc_dt.strftime("%H:%M:%S")
+        correct_end_date = end_utc_dt.strftime("%d/%m/%Y")
 
         ev_data["time"] = correct_time_str
         ev_data["date"] = correct_date_str
@@ -515,7 +510,7 @@ def sync_streaming_links_and_force_bd_time(live_feed, my_events):
         try:
             up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
             if up_res.status_code == 200:
-                print(f"[Fixed Crash & Synced] ID: {event_id} | {ev_data.get('teamAName')} vs {ev_data.get('teamBName')} -> BD: {correct_date_str} {correct_time_str}")
+                print(f"[Reset to UTC] ID: {event_id} | {ev_data.get('teamAName')} vs {ev_data.get('teamBName')} -> UTC: {correct_date_str} {correct_time_str}")
                 updated_count += 1
                 time.sleep(0.5)
         except Exception as e:
@@ -555,8 +550,8 @@ def main():
 
     print(f"Total Matches found in Feed: {len(live_feed)}")
 
-    # ৩. ডাটাবেসের পুরোনো ম্যাচগুলোর ভুল সময় ফিক্স করা (অ্যাপ ক্র্যাশ বন্ধ করবে)
-    updated = sync_streaming_links_and_force_bd_time(live_feed, my_events)
+    # ৩. ডাটাবেসের পুরোনো ম্যাচগুলোর সময় ঠিক করা (ডাবল কনভার্সন রিমুভ)
+    updated = sync_streaming_links_and_reset_utc_time(live_feed, my_events)
     if updated > 0:
         time.sleep(2)
         my_events = get_my_saved_events()
