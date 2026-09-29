@@ -175,7 +175,7 @@ def sync_manual_events():
             existing_teams.append((t_a, t_b))
 
     # ====================================================
-    # ১. নতুন ইভেন্ট অটো-অ্যাড (অ্যাপের ফরম্যাট অনুযায়ী)
+    # ১. নতুন ইভেন্ট অটো-অ্যাড (স্মালি কোড অনুযায়ী হুবহু স্কিমা)
     # ====================================================
     added_count = 0
     for f in live_feed:
@@ -216,7 +216,7 @@ def sync_manual_events():
         new_event_id = str(max_id + 1 + added_count)
         new_order_index = max_order + 1 + added_count
 
-        # ক্যাটাগরি নির্ধারণ
+        # ক্যাটাগরি ম্যাপিং
         raw_cat = str(f.get("category") or f.get("sport") or "").lower()
         if "motor" in raw_cat or "racing" in raw_cat or "f1" in raw_cat:
             category_name = "Motorsports"
@@ -226,34 +226,48 @@ def sync_manual_events():
             category_name = "Football"
 
         tournament_name = f.get("tournament") or f.get("league") or "International Friendly Games"
-        
-        # অ্যাপের সাথে হুবহু মিল রেখে ডেট-টাইম তৈরি
-        date_iso = match_dt.strftime("%Y-%m-%d") if match_dt else now_bd.strftime("%Y-%m-%d")
-        time_full = match_dt.strftime("%Y-%m-%d %H:%M:%S") if match_dt else f"{date_iso} 20:00:00"
+        event_logo = f.get("tournament_logo") or f.get("league_logo") or f.get("teamAFlag") or ""
 
-        # অ্যাপের নমুনা ডাটাবেস অবজেক্ট
+        # অ্যাডমিন অ্যাপের তারিখ ও সময় ফরম্যাট (DD/MM/YYYY এবং hh:mm a)
+        date_str = match_dt.strftime("%d/%m/%Y") if match_dt else (raw_date or now_bd.strftime("%d/%m/%Y"))
+        time_str = match_dt.strftime("%I:%M %p").lower() if match_dt else (raw_time.lower() or "04:00 pm")
+
+        links_path_val = f"links/{new_event_id}"
+
+        # Smali কোডের Lf7/g; ভেতরের v15 অবজেক্টের হুবহু রিপ্রেজেন্টেশন
         event_body = {
+            "visible": True,
+            "isHot": False,
+            "priority": -1,
+            "category": category_name,
+            "eventName": tournament_name,
+            "eventLogo": event_logo,
             "teamAName": f_raw_a,
             "teamBName": f_raw_b,
             "teamAFlag": f.get("teamAFlag") or f.get("team1_logo") or f.get("logo1") or "",
             "teamBFlag": f.get("teamBFlag") or f.get("team2_logo") or f.get("logo2") or "",
+            "date": date_str,
+            "time": time_str,
+            "notiThumb": "",
+            "countryCodes": "",
+            "whitelistCountryCodes": "",
+            "messages": "{}",
+            "links": links_path_val,
+            # ব্যাকওয়ার্ড কম্প্যাটিবিলিটির জন্য অতিরিক্ত সেফটি ফিল্ড
             "match_title": tournament_name,
-            "category": category_name,
-            "time": time_full,
-            "date": date_iso,
-            "status": "Not Started",
-            "links": formatted_links
+            "matchTitle": tournament_name,
+            "status": "Not Started"
         }
 
+        # সার্ভারে পোস্ট করার মূল পেলোড
         payload = {
             "from": "events",
             "requestData": generate_security_token(),
             "id": new_event_id,
             "event": json.dumps(event_body),
-            "links": f"links/{new_event_id}",
-            "order_index": new_order_index,
-            "linksPath": f"links/{new_event_id}",
-            "linksData": json.dumps(formatted_links)
+            "links": json.dumps(formatted_links),
+            "linksPath": links_path_val,
+            "order_index": new_order_index
         }
 
         try:
@@ -321,20 +335,14 @@ def sync_manual_events():
         if not formatted_links:
             continue
 
-        # ইভেন্টের ভেতরে লিংক আপডেট
-        if isinstance(ev_data, dict):
-            ev_data["links"] = formatted_links
-            event_str = json.dumps(ev_data)
-        else:
-            event_str = item_db.get("event")
-
-        links_path = str(item_db.get("links") or item_db.get("linksPath") or f"links/{event_id}")
+        links_path = str(item_db.get("linksPath") or f"links/{event_id}")
+        event_str = item_db["event"] if ("event" in item_db and isinstance(item_db["event"], str)) else json.dumps(ev_data)
 
         payload = {
             "from": "events",
             "id": str(event_id),
             "event": event_str,
-            "links": links_path,
+            "links": json.dumps(formatted_links),
             "linksPath": links_path,
             "linksData": json.dumps(formatted_links),
             "requestData": generate_security_token()
