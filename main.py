@@ -1,6 +1,5 @@
 import os
 import sys
-import time
 import base64
 from datetime import datetime, timezone, timedelta
 import json
@@ -13,7 +12,7 @@ FEED_SOURCE = os.getenv("SECRET_FEED_SOURCE", "")
 # বাংলাদেশ টাইমজোন (UTC+6)
 BD_TZ = timezone(timedelta(hours=6))
 
-# প্রতি ৫ মিনিটে সর্বোচ্চ কয়টি নতুন ম্যাচ অ্যাড হবে
+# প্রতি রানে সর্বোচ্চ ৫টি নতুন ম্যাচ অ্যাড হবে
 MAX_ADD_PER_RUN = 5
 
 def generate_security_token():
@@ -71,7 +70,7 @@ def parse_feed_time_to_bd(date_str, time_str):
 
         display_time = match_bd_dt.strftime("%I:%M %p %d/%m/%Y")
         return match_utc_dt, match_bd_dt, display_time
-    except Exception as e:
+    except Exception:
         return None, None, None
 
 def get_my_saved_events():
@@ -158,6 +157,7 @@ def sync_and_auto_add_events():
         if not isinstance(feed_match, dict):
             continue
 
+        # ১. স্ট্যাটাস শেষ হওয়া ম্যাচ স্কিপ
         raw_status = str(feed_match.get("matchStatus") or feed_match.get("status") or "").lower()
         if raw_status in ["live_ended", "finished", "ended"]:
             continue
@@ -169,11 +169,11 @@ def sync_and_auto_add_events():
         if not match_bd_dt:
             continue
 
-        # ১. অতীত ম্যাচ বাদ
+        # ২. আজকের আগের পুরোনো ম্যাচ স্কিপ
         if match_bd_dt < start_of_today_bd:
             continue
 
-        # ২. খেলা শেষ হয়ে গেলে বাদ (ডিলিটের পর যাতে ফিরে না আসে)
+        # ৩. খেলার সময় পার হয়ে গেলে স্কিপ (ডিলিটের পর যাতে আর ফিরে না আসে)
         duration_min = 135
         if feed_match.get("end_time") and time_val:
             try:
@@ -185,7 +185,7 @@ def sync_and_auto_add_events():
                     e_m += 24 * 60
                 if e_m - s_m > 0:
                     duration_min = e_m - s_m
-            except:
+            except Exception:
                 pass
 
         match_end_utc = match_utc_dt + timedelta(minutes=duration_min)
@@ -200,14 +200,14 @@ def sync_and_auto_add_events():
         clean_fb = clean_name(t_b_raw)
         clean_ftitle = clean_name(f_title)
 
-        # ৩. বিদ্যমান ম্যাচ চেক
+        # ৪. প্যানেলে আগে থেকে আছে কি না চেক
         matched_db_item = None
         for item_db in my_events:
             ev_data = item_db
             if "event" in item_db and isinstance(item_db["event"], str):
                 try:
                     ev_data = json.loads(item_db["event"])
-                except:
+                except Exception:
                     pass
 
             db_a = clean_name(ev_data.get("teamAName") or item_db.get("teamAName") or ev_data.get("team1"))
@@ -221,7 +221,7 @@ def sync_and_auto_add_events():
                 matched_db_item = item_db
                 break
 
-        # ৪. ম্যাচ বিদ্যমান থাকলে স্ট্রিমিং লিংক আপডেট
+        # ৫. ম্যাচ অলরেডি থাকলে -> শুধু স্ট্রিমিং লিঙ্ক আপডেট
         if matched_db_item:
             links = feed_match.get("streaming_links") or feed_match.get("links") or []
             formatted_links = format_links_data(links)
@@ -247,10 +247,9 @@ def sync_and_auto_add_events():
             except Exception as e:
                 print(f"Error updating links for {t_a_raw}:", e)
 
-        # ৫. নতুন ম্যাচ অ্যাড করা (প্রতি সাইকেলে সর্বোচ্চ ৫টি)
+        # ৬. নতুন ম্যাচ হলে -> অটো অ্যাড (সর্বোচ্চ ৫টি প্রতি রানে)
         else:
             if added_count >= MAX_ADD_PER_RUN:
-                # ৫টি ম্যাচ ইতিমধ্যে অ্যাড হয়ে গেলে এই সাইকেলে আর নতুন ম্যাচ অ্যাড হবে না
                 continue
 
             links = feed_match.get("streaming_links") or feed_match.get("links") or []
@@ -301,16 +300,12 @@ def sync_and_auto_add_events():
             except Exception as e:
                 print(f"Error adding {t_a_raw}:", e)
 
-    print(f"\nCycle Completed -> Added: {added_count} | Links Updated: {updated_count}")
+    print(f"\nExecution Finished -> Added: {added_count} | Links Updated: {updated_count}")
 
 if __name__ == "__main__":
-    while True:
-        current_time = datetime.now(BD_TZ).strftime("%I:%M:%S %p")
-        print(f"\n==========================================")
-        print(f"Running Sync at {current_time} (BD Time)")
-        print(f"==========================================")
-        
-        sync_and_auto_add_events()
-        
-        print("\nSleeping for 5 minutes (300 seconds)...")
-        time.sleep(300)
+    current_time = datetime.now(BD_TZ).strftime("%I:%M:%S %p")
+    print("==========================================")
+    print(f"Running Sync at {current_time} (BD Time)")
+    print("==========================================")
+    
+    sync_and_auto_add_events()
