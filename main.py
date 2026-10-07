@@ -209,8 +209,10 @@ def get_my_saved_events():
                 return data
             elif isinstance(data, dict):
                 return data.get("events") or data.get("data") or []
+        else:
+            print(f"[Panel Error] admin/select HTTP {res.status_code}: {res.text[:180]}")
     except Exception as e:
-        print("Error fetching saved events:", e)
+        print(f"[Panel Connection Error] admin/select: {e}")
     return []
 
 def remove_duplicate_events_step(my_events):
@@ -251,6 +253,8 @@ def remove_duplicate_events_step(my_events):
                     deleted_dup += 1
                     print(f"[Duplicate Removed] ID: {event_id} | {t_a} vs {t_b}")
                     time.sleep(1.0)
+                else:
+                    print(f"[Delete Failed] ID: {event_id} | HTTP {del_res.status_code}: {del_res.text[:120]}")
             except Exception as e:
                 print(f"Error removing duplicate {event_id}:", e)
         else:
@@ -318,6 +322,8 @@ def delete_expired_events_step(my_events):
                 deleted_count += 1
                 print(f"[Auto Deleted Old Finished] ID: {item['id']} | {item['t_a']} vs {item['t_b']}")
                 time.sleep(1.0)
+            else:
+                print(f"[Delete Failed] ID: {item['id']} | HTTP {del_res.status_code}: {del_res.text[:120]}")
         except Exception as e:
             print(f"Error deleting event {item['id']}:", e)
 
@@ -386,7 +392,6 @@ def add_new_events_step(live_feed, my_events):
         if match_utc_dt <= now_utc and raw_status in ["live_ended", "finished", "ended"]:
             continue
 
-        # Dynamic End Time calculation matching GeeSports engine
         feed_end_utc, feed_end_bd = parse_feed_time_to_bd(feed_match.get("end_date"), feed_match.get("end_time"))
         if feed_end_utc and feed_end_utc > match_utc_dt:
             end_dt = feed_end_bd
@@ -490,8 +495,10 @@ def add_new_events_step(live_feed, my_events):
                     time.sleep(2.0)
                     break
                 else:
+                    print(f"[Add Failed Attempt {attempt+1}] {t_a_raw} vs {t_b_raw} | HTTP {in_res.status_code} | Response: {in_res.text[:180]}")
                     time.sleep(1.5)
-            except Exception:
+            except Exception as ex:
+                print(f"[Add Exception Attempt {attempt+1}] {t_a_raw} vs {t_b_raw}: {ex}")
                 time.sleep(1.5)
 
         if not success:
@@ -558,7 +565,6 @@ def sync_streaming_links_step(live_feed, my_events):
         ev_data["time"] = correct_time_str
         ev_data["date"] = correct_date_str
 
-        # Instant Finish Sync: If GeeSports feed marks match as live_ended, set end time to past
         if matched_match["status"] in ["live_ended", "finished", "ended"]:
             past_dt = now_bd - timedelta(minutes=5)
             ev_data["end_date"] = past_dt.strftime("%d/%m/%Y")
@@ -590,6 +596,8 @@ def sync_streaming_links_step(live_feed, my_events):
             if up_res.status_code == 200:
                 print(f"[Updated] ID: {event_id} | {ev_data.get('teamAName')} vs {ev_data.get('teamBName')} | Status: {matched_match['status']}")
                 updated_count += 1
+            else:
+                print(f"[Update Failed] ID: {event_id} | HTTP {up_res.status_code}: {up_res.text[:120]}")
         except Exception as e:
             print(f"Error updating ID {event_id}:", e)
 
