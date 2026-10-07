@@ -163,6 +163,30 @@ def get_my_saved_events():
         print("Error fetching saved events:", e)
     return []
 
+def delete_single_event_from_db(event_id):
+    str_id = str(event_id)
+    int_id = int(str_id) if str_id.isdigit() else str_id
+
+    del_payload = {
+        "from": "events",
+        "table": "events",
+        "id": int_id,
+        "eventId": str_id,
+        "requestData": generate_security_token()
+    }
+
+    headers = get_headers()
+    endpoints = ["admin/delete", "admin/delete_event"]
+
+    for ep in endpoints:
+        try:
+            r = requests.post(BASE_URL + ep, json=del_payload, headers=headers, timeout=10)
+            if r.status_code in [200, 201]:
+                return True, r.text[:80]
+        except Exception:
+            pass
+    return False, "Failed"
+
 def remove_duplicate_events_step(my_events):
     seen = {}
     deleted_dup = 0
@@ -191,18 +215,11 @@ def remove_duplicate_events_step(my_events):
             continue
 
         if match_key in seen:
-            del_payload = {
-                "id": int(event_id) if str(event_id).isdigit() else str(event_id),
-                "requestData": generate_security_token()
-            }
-            try:
-                del_res = requests.post(BASE_URL + "admin/delete_event", json=del_payload, headers=get_headers(), timeout=12)
-                if del_res.status_code in [200, 201]:
-                    deleted_dup += 1
-                    print(f"[Duplicate Removed] ID: {event_id} | {t_a} vs {t_b}")
-                    time.sleep(0.5)
-            except Exception as e:
-                print(f"Error removing duplicate {event_id}:", e)
+            ok, resp_txt = delete_single_event_from_db(event_id)
+            if ok:
+                deleted_dup += 1
+                print(f"[Duplicate Removed] ID: {event_id} | {t_a} vs {t_b} | Resp: {resp_txt}")
+                time.sleep(0.1)
         else:
             seen[match_key] = event_id
 
@@ -246,19 +263,14 @@ def manage_finished_events_step(my_events, live_feed):
     to_delete = finished_list[KEEP_FINISHED_LIMIT:]
     deleted_count = 0
 
+    print(f"Total Finished in DB: {len(finished_list)} | Target to Delete: {len(to_delete)}")
+
     for item in to_delete:
-        del_payload = {
-            "id": int(item["id"]) if str(item["id"]).isdigit() else str(item["id"]),
-            "requestData": generate_security_token()
-        }
-        try:
-            del_res = requests.post(BASE_URL + "admin/delete_event", json=del_payload, headers=get_headers(), timeout=12)
-            if del_res.status_code in [200, 201]:
-                deleted_count += 1
-                print(f"[FIFO Finished Limit Exceeded - Deleted] ID: {item['id']} | {item['t_a']} vs {item['t_b']}")
-                time.sleep(0.3)
-        except Exception as e:
-            print(f"Error deleting event {item['id']}:", e)
+        ok, resp_txt = delete_single_event_from_db(item["id"])
+        if ok:
+            deleted_count += 1
+            print(f"[Deleted Exceeded Finished] ID: {item['id']} | {item['t_a']} vs {item['t_b']} | Resp: {resp_txt}")
+            time.sleep(0.1)
 
     return deleted_count
 
@@ -275,9 +287,9 @@ def format_links_data(streaming_links):
 
         original_name = str(item.get("name") or f"Server {idx + 1}").strip()
         url = str(item.get("link") or item.get("url") or "").strip()
-        
+
         name_upper = original_name.upper().replace(" ", "")
-        
+
         if any(x in name_upper for x in ["LOWQUALITY", "USEVPN", "LINK", "STREAMTV+HD"]):
             if dlsports_counter == 1:
                 name = "DLSPORTS"
@@ -427,6 +439,8 @@ def add_events_step(live_feed, my_events):
         links_json_str = json.dumps(formatted_links)
 
         insert_payload = {
+            "from": "events",
+            "table": "events",
             "event": json.dumps(new_event_dict),
             "links": links_json_str,
             "linksData": links_json_str,
@@ -434,21 +448,21 @@ def add_events_step(live_feed, my_events):
             "requestData": generate_security_token()
         }
 
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 insert_payload["requestData"] = generate_security_token()
-                in_res = requests.post(BASE_URL + "admin/add_event", json=insert_payload, headers=get_headers(), timeout=15)
+                in_res = requests.post(BASE_URL + "admin/add_event", json=insert_payload, headers=get_headers(), timeout=12)
                 if in_res.status_code in [200, 201]:
                     added_count += 1
                     lbl = "LIVE" if match_utc_dt <= now_utc else "UPCOMING"
-                    print(f"[{lbl} Added {added_count}] {t_a_raw} vs {t_b_raw} | UTC Time: {utc_date_str} {utc_time_str}")
+                    print(f"[{lbl} Added {added_count}] {t_a_raw} vs {t_b_raw} | UTC: {utc_date_str} {utc_time_str}")
                     my_events.append(new_event_dict)
-                    time.sleep(1.2)
+                    time.sleep(0.5)
                     break
                 else:
-                    time.sleep(1.0)
+                    time.sleep(0.5)
             except Exception:
-                time.sleep(1.0)
+                time.sleep(0.5)
 
     return added_count
 
@@ -523,6 +537,8 @@ def sync_streaming_links_and_reset_utc_time(live_feed, my_events):
         links_path = str(item_db.get("linksPath") or ev_data.get("linksPath") or ev_data.get("links") or f"links/{event_id}")
 
         payload = {
+            "from": "events",
+            "table": "events",
             "id": str(event_id),
             "event": json.dumps(ev_data),
             "linksPath": links_path,
@@ -531,11 +547,11 @@ def sync_streaming_links_and_reset_utc_time(live_feed, my_events):
         }
 
         try:
-            up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
+            up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=10)
             if up_res.status_code == 200:
                 updated_count += 1
-                time.sleep(0.3)
-        except Exception as e:
+                time.sleep(0.1)
+        except Exception:
             pass
 
     return updated_count
@@ -562,17 +578,17 @@ def main():
 
     dup_removed = remove_duplicate_events_step(my_events)
     if dup_removed > 0:
-        time.sleep(1)
+        time.sleep(0.5)
         my_events = get_my_saved_events()
 
     deleted = manage_finished_events_step(my_events, live_feed)
     if deleted > 0:
-        time.sleep(1)
+        time.sleep(0.5)
         my_events = get_my_saved_events()
 
     updated = sync_streaming_links_and_reset_utc_time(live_feed, my_events)
     if updated > 0:
-        time.sleep(1)
+        time.sleep(0.5)
         my_events = get_my_saved_events()
 
     added = add_events_step(live_feed, my_events)
