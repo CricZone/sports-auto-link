@@ -49,17 +49,10 @@ def delete_all_events():
         print("কোনো ইভেন্ট পাওয়া যায়নি। প্যানেল ইতিমধ্যে খালি।")
         return
 
-    print(f"প্যানেলে মোট {total} টি ইভেন্ট পাওয়া গেছে।")
-    confirm = (
-        input("আপনি কি নিশ্চিত সব ইভেন্ট ডিলেট করতে চান? (y/N): ")
-        .strip()
-        .lower()
+    print(f"মোট {total} টি ইভেন্ট পাওয়া গেছে।")
+    print(
+        "স্বয়ংক্রিয়ভাবে সব ইভেন্ট মুছে ফেলা শুরু হচ্ছে...\n" + "-" * 40
     )
-    if confirm != "y":
-        print("অপারেশন বাতিল করা হলো।")
-        return
-
-    print("\nইভেন্ট মুছে ফেলা শুরু হচ্ছে...\n" + "-" * 40)
     deleted = 0
 
     for idx, item in enumerate(events, 1):
@@ -104,7 +97,7 @@ def delete_all_events():
         except Exception as e:
             print(f"[{idx}/{total}] এরর (ID: {event_id}): {e}")
 
-        # Cloudflare Workers রেট লিমিট এড়াতে বিরতি
+        # Worker রেট লিমিট এড়াতে বিরতি
         time.sleep(0.4)
 
     print("-" * 40)
