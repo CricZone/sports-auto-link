@@ -14,12 +14,11 @@ FEED_SOURCE = os.getenv("SECRET_FEED_SOURCE", "https://s1.noobon.top/axsx/stream
 # Bangladesh Timezone (UTC+6)
 BD_TZ = timezone(timedelta(hours=6))
 
-# Execution & Processing Limits
+# Limits & Intervals
 MAX_ADD_PER_RUN = 5
 KEEP_FINISHED_LIMIT = 50
 LOOP_INTERVAL_SECONDS = 300
 
-# High-Performance Session with keep-alive
 session = requests.Session()
 
 def get_headers():
@@ -86,7 +85,6 @@ def get_match_banner_image_16x9(logo1, logo2, tournament_logo=""):
 
     return def_logo
 
-# Worker-এর লজিক অনুযায়ী হুবহু স্পোর্টস ডিউরেশন ক্যালকুলেশন ইঞ্জিন
 def get_exact_sport_duration_minutes(match_dict):
     cat = str(match_dict.get("category") or "").lower()
     tour = str(match_dict.get("tournament") or match_dict.get("tournament_name") or match_dict.get("eventName") or match_dict.get("name") or "").lower()
@@ -100,7 +98,6 @@ def get_exact_sport_duration_minutes(match_dict):
     is_quarter = "quarter" in combined
     is_knockout = is_semi or is_quarter or any(k in combined for k in ["round of 16", "round of 8", "round of 32", "r16", "r32", "playoff", "play-off", "knockout"])
 
-    # 1. Full-Day Tournament Streams & Pop-up Channels (EVENTO)
     if any(k in combined for k in ["evento", "sports live", "tv channel"]):
         if "tennis" in combined: return 960
         if "cycling" in combined: return 480
@@ -109,13 +106,9 @@ def get_exact_sport_duration_minutes(match_dict):
         if "judo" in combined or "wrestling" in combined: return 480
         return 960
 
-    # 2. Tennis (Standard Match)
     if "tennis" in combined:
-        if is_final or any(k in combined for k in ["grand slam", "wimbledon", "us open", "french open", "australian open"]):
-            return 330
-        return 240
+        return 330 if (is_final or any(k in combined for k in ["grand slam", "wimbledon", "us open", "french open", "australian open"])) else 240
 
-    # 3. Cricket
     if "cricket" in combined or "cricket" in cat:
         if any(k in combined for k in ["hong kong sixes", "hk sixes", "hong kong 6s", "hongkong sixes"]):
             return 570
@@ -138,25 +131,20 @@ def get_exact_sport_duration_minutes(match_dict):
         if "t5" in combined or "sixes" in combined: return 60
         return 230
 
-    # 4. Football / Soccer
     if "football" in combined or "soccer" in combined or "football" in cat:
         if is_final: return 210
         if is_knockout: return 195
         return 180
 
-    # 5. American Football (NFL / NCAA / CFL)
     if any(k in combined for k in ["nfl", "american football", "cfl", "ncaa"]):
         return 400 if is_final else 360
 
-    # 6. Basketball (NBA / FIBA)
     if any(k in combined for k in ["nba", "basketball", "fiba", "euroleague"]):
         return 210 if (is_final or is_knockout) else 180
 
-    # 7. Baseball (MLB)
     if any(k in combined for k in ["baseball", "mlb", "npb", "kbo"]):
         return 220
 
-    # 8. Combat Sports & Wrestling
     if any(k in combined for k in ["wwe", "raw", "smackdown", "nxt", "aew", "tna", "wrestling"]):
         if "raw" in combined: return 200
         if any(k in combined for k in ["ple", "wrestlemania", "royal rumble", "summer slam"]): return 260
@@ -164,13 +152,11 @@ def get_exact_sport_duration_minutes(match_dict):
     if any(k in combined for k in ["ufc", "mma", "one fight", "bellator"]): return 240
     if "boxing" in combined: return 210
 
-    # 9. Motorsports
     if "formula 1" in combined or "f1" in combined: return 420
     if any(k in combined for k in ["motogp", "motorgp", "sbk"]): return 480
     if "nascar" in combined: return 300
     if "wrc" in combined or "rally" in combined: return 480
 
-    # 10. Others
     if "horse racing" in combined or "horse" in combined: return 600
     if "racing" in combined: return 480
     if "snooker" in combined: return 270
@@ -180,6 +166,7 @@ def get_exact_sport_duration_minutes(match_dict):
 
     return 160
 
+# UTC to BD Time (+6 Hours)
 def parse_feed_time_to_bd(date_str, time_str):
     now_dt = datetime.now(BD_TZ)
     if not date_str:
@@ -206,7 +193,9 @@ def parse_feed_time_to_bd(date_str, time_str):
         elif "am" in lower_t and hh == 12:
             hh = 0
 
+        # Feed UTC Time
         match_utc_dt = datetime(year, month, day, hh, mm, ss, tzinfo=timezone.utc)
+        # Convert to Bangladesh Time
         match_bd_dt = match_utc_dt.astimezone(BD_TZ)
         return match_utc_dt, match_bd_dt
     except Exception:
@@ -381,7 +370,6 @@ def delete_expired_events_step(my_events):
     retained_events = active_events + [f["raw_item"] for f in kept_finished]
     return retained_events, deleted_count
 
-# Worker-এর ব্র্যান্ডিং ও ClearKey DRM সাপোর্ট যুক্ত লিংক ফরম্যাটার
 def format_links_data(streaming_links):
     formatted = []
     if not streaming_links or not isinstance(streaming_links, list):
@@ -396,7 +384,6 @@ def format_links_data(streaming_links):
         if not url:
             continue
 
-        # Worker naming filtering
         upper_raw = raw_name.upper().replace(" ", "")
         if "STREAMTV" in upper_raw:
             display_name = f"DLSPORTS {idx + 1}"
@@ -427,7 +414,6 @@ def format_links_data(streaming_links):
         api_key = str(item.get("api") or item.get("drmKey") or item.get("key") or item.get("license") or "").strip()
         token_api = str(item.get("tokenApi") or "").strip()
 
-        # DRM ClearKey schema auto-append
         if api_key and ":" in api_key:
             url += f"|drmScheme=clearkey&drmLicense={api_key}"
 
@@ -451,9 +437,6 @@ def format_links_data(streaming_links):
 
 def add_new_events_step(live_feed, my_events):
     now_bd = datetime.now(BD_TZ)
-    now_utc = datetime.now(timezone.utc)
-    start_of_today_bd = now_bd.replace(hour=0, minute=0, second=0, microsecond=0)
-
     added_count = 0
 
     for feed_match in live_feed:
@@ -463,36 +446,29 @@ def add_new_events_step(live_feed, my_events):
         if not isinstance(feed_match, dict):
             continue
 
+        raw_status = str(feed_match.get("matchStatus") or feed_match.get("status") or "").lower().strip()
+        if raw_status in ["live_ended", "finished", "ended", "completed", "ft", "aet"]:
+            continue
+
         date_val = feed_match.get("date") or feed_match.get("match_date") or feed_match.get("startDate")
         time_val = feed_match.get("time") or feed_match.get("match_time") or feed_match.get("startTime")
-        match_utc_dt, match_bd_dt = parse_feed_time_to_bd(date_val, time_val)
+        _, match_bd_dt = parse_feed_time_to_bd(date_val, time_val)
 
-        if match_bd_dt < start_of_today_bd:
-            continue
-
-        raw_status = str(feed_match.get("matchStatus") or feed_match.get("status") or "").lower()
-        if match_utc_dt <= now_utc and raw_status in ["live_ended", "finished", "ended"]:
-            continue
-
-        # Dynamic End-Time calculation
         feed_end_utc, feed_end_bd = parse_feed_time_to_bd(
             feed_match.get("end_date") or feed_match.get("endDate") or date_val,
             feed_match.get("end_time") or feed_match.get("endTime") or feed_match.get("end")
         )
         
         fallback_dur = get_exact_sport_duration_minutes(feed_match)
-        if feed_end_utc and feed_end_utc > match_utc_dt:
+        if feed_end_bd and feed_end_bd > match_bd_dt:
             end_dt = feed_end_bd
-            match_end_utc = feed_end_utc
         elif feed_match.get("duration") and str(feed_match.get("duration")).isdigit():
             dur = int(feed_match.get("duration"))
             end_dt = match_bd_dt + timedelta(minutes=dur)
-            match_end_utc = match_utc_dt + timedelta(minutes=dur)
         else:
             end_dt = match_bd_dt + timedelta(minutes=fallback_dur)
-            match_end_utc = match_utc_dt + timedelta(minutes=fallback_dur)
 
-        if match_end_utc < now_utc:
+        if end_dt <= now_bd:
             continue
 
         t_a_raw = replace_banned_names(feed_match.get("teamAName") or feed_match.get("team1") or feed_match.get("team1_name") or feed_match.get("teamA") or "")
@@ -581,7 +557,7 @@ def add_new_events_step(live_feed, my_events):
                 in_res = session.post(BASE_URL + "admin/add_event", json=insert_payload, timeout=15)
                 if in_res.status_code in [200, 201]:
                     added_count += 1
-                    print(f"[Added Event {added_count}/{MAX_ADD_PER_RUN}] {t_a_raw} vs {t_b_raw} | Links: {len(formatted_links)}")
+                    print(f"[Added Event {added_count}/{MAX_ADD_PER_RUN}] {t_a_raw} vs {t_b_raw} | BD Time: {match_bd_dt.strftime('%I:%M %p')}")
                     success = True
                     time.sleep(0.8)
                     break
@@ -597,7 +573,6 @@ def add_new_events_step(live_feed, my_events):
 
 def sync_streaming_links_step(live_feed, my_events):
     now_bd = datetime.now(BD_TZ)
-    now_utc = datetime.now(timezone.utc)
     indexed_feed = []
 
     for f in live_feed:
@@ -653,25 +628,25 @@ def sync_streaming_links_step(live_feed, my_events):
             continue
 
         f_obj = matched_match["raw_feed"]
-        match_utc, correct_bd_dt = parse_feed_time_to_bd(f_obj.get("date"), f_obj.get("time"))
+        _, correct_bd_dt = parse_feed_time_to_bd(f_obj.get("date"), f_obj.get("time"))
         correct_time_str = correct_bd_dt.strftime("%I:%M:%S %p")
         correct_date_str = correct_bd_dt.strftime("%d/%m/%Y")
 
+        # প্যানেলের ম্যাচ টাইমকে সঠিক BD Time-এ ওভাররাইট করা
         ev_data["time"] = correct_time_str
         ev_data["date"] = correct_date_str
 
-        # End time sync
-        feed_end_utc, feed_end_bd = parse_feed_time_to_bd(
+        _, feed_end_bd = parse_feed_time_to_bd(
             f_obj.get("end_date") or f_obj.get("endDate"),
             f_obj.get("end_time") or f_obj.get("endTime")
         )
         sport_dur = get_exact_sport_duration_minutes(ev_data)
 
-        if matched_match["status"] in ["live_ended", "finished", "ended"]:
+        if matched_match["status"] in ["live_ended", "finished", "ended", "completed", "ft"]:
             past_dt = now_bd - timedelta(minutes=5)
             ev_data["end_date"] = past_dt.strftime("%d/%m/%Y")
             ev_data["end_time"] = past_dt.strftime("%I:%M:%S %p")
-        elif feed_end_utc and feed_end_utc > match_utc:
+        elif feed_end_bd and feed_end_bd > correct_bd_dt:
             ev_data["end_date"] = feed_end_bd.strftime("%d/%m/%Y")
             ev_data["end_time"] = feed_end_bd.strftime("%I:%M:%S %p")
         elif f_obj.get("duration") and str(f_obj.get("duration")).isdigit():
@@ -684,7 +659,6 @@ def sync_streaming_links_step(live_feed, my_events):
             ev_data["end_date"] = end_dt.strftime("%d/%m/%Y")
             ev_data["end_time"] = end_dt.strftime("%I:%M:%S %p")
 
-        # Notification banner auto sync
         l1 = ev_data.get("teamAFlag") or f_obj.get("teamAFlag") or f_obj.get("team1_logo")
         l2 = ev_data.get("teamBFlag") or f_obj.get("teamBFlag") or f_obj.get("team2_logo")
         t_logo = ev_data.get("eventLogo") or f_obj.get("eventLogo") or f_obj.get("tournament_logo")
@@ -704,7 +678,7 @@ def sync_streaming_links_step(live_feed, my_events):
         try:
             up_res = session.post(BASE_URL + "admin/update_event", json=payload, timeout=12)
             if up_res.status_code == 200:
-                print(f"[Updated] ID: {event_id} | {ev_data.get('teamAName')} vs {ev_data.get('teamBName')} | Status: {matched_match['status']}")
+                print(f"[Updated BD Time] ID: {event_id} | {ev_data.get('teamAName')} vs {ev_data.get('teamBName')} -> {correct_time_str}")
                 updated_count += 1
             else:
                 print(f"[Update Failed] ID: {event_id} | HTTP {up_res.status_code}")
@@ -722,10 +696,7 @@ def run_single_sync_cycle():
     print(f"\n[Cycle Started: {datetime.now(BD_TZ).strftime('%Y-%m-%d %I:%M:%S %p')}]")
     print(f"Total Events currently in Panel: {len(my_events)}")
 
-    # 1. Deduplicate events
     my_events, dup_removed = remove_duplicate_events_step(my_events)
-
-    # 2. Retain 50 finished and purge older entries
     my_events, deleted = delete_expired_events_step(my_events)
 
     try:
@@ -745,15 +716,12 @@ def run_single_sync_cycle():
 
     print(f"Total Matches found in Feed: {len(live_feed)}")
 
-    # 3. Add max 5 new events per execution cycle
     added = add_new_events_step(live_feed, my_events)
 
-    # 4. Refresh IDs if new matches were inserted
     if added > 0:
         time.sleep(1.0)
         my_events = get_my_saved_events()
 
-    # 5. Sync streaming links and status
     updated = sync_streaming_links_step(live_feed, my_events)
 
     print("==========================================")
