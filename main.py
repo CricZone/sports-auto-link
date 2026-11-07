@@ -13,14 +13,21 @@ FEED_SOURCE = os.getenv("SECRET_FEED_SOURCE", "")
 # Bangladesh Timezone (UTC+6)
 BD_TZ = timezone(timedelta(hours=6))
 
-# Maximum new matches to add per cycle
+# Limits & Intervals
 MAX_ADD_PER_RUN = 5
-
-# Maximum finished matches to retain (older ones are auto-deleted)
 KEEP_FINISHED_LIMIT = 50
-
-# Continuous loop interval in seconds (5 minutes)
 LOOP_INTERVAL_SECONDS = 300
+
+# Persistent HTTP Session for fast connection pooling
+session = requests.Session()
+
+def get_headers():
+    return {
+        "Content-Type": "application/json; charset=utf-8",
+        "User-Agent": "okhttp/4.9.2"
+    }
+
+session.headers.update(get_headers())
 
 def generate_security_token():
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -28,12 +35,6 @@ def generate_security_token():
     rev1 = b64[::-1]
     hex_str = "".join(f"{b:02x}" for b in rev1.encode("utf-8"))
     return hex_str[::-1]
-
-def get_headers():
-    return {
-        "Content-Type": "application/json; charset=utf-8",
-        "User-Agent": "okhttp/4.9.2"
-    }
 
 def clean_name(val):
     if not val:
@@ -54,19 +55,21 @@ def fix_image_url(url):
         url = url.replace("api.sofascore.com", "img.sofascore.com")
     return url
 
-# Sports Duration Fallback Engine (GeeSports Standards)
+# Sports Duration Fallback Engine (Mirrored 1:1 with Worker Logic)
 def get_exact_sport_duration_minutes(match_dict):
     cat = str(match_dict.get("category") or "").lower()
-    tour = str(match_dict.get("tournament") or match_dict.get("eventName") or "").lower()
-    t1 = str(match_dict.get("teamAName") or match_dict.get("team1") or "").lower()
-    t2 = str(match_dict.get("teamBName") or match_dict.get("team2") or "").lower()
-    title = str(match_dict.get("title") or match_dict.get("name") or "").lower()
+    tour = str(match_dict.get("tournament") or match_dict.get("tournament_name") or match_dict.get("eventName") or match_dict.get("name") or "").lower()
+    t1 = str(match_dict.get("team1_name") or match_dict.get("team1") or match_dict.get("teamAName") or "").lower()
+    t2 = str(match_dict.get("team2_name") or match_dict.get("team2") or match_dict.get("teamBName") or "").lower()
+    title = str(match_dict.get("title") or "").lower()
     combined = f"{cat} {tour} {title} {t1} {t2}"
 
     is_final = "final" in combined and "semi" not in combined and "quarter" not in combined
     is_semi = "semi" in combined
     is_quarter = "quarter" in combined
-    is_knockout = is_semi or is_quarter or any(k in combined for k in ["round of 16", "round of 8", "round of 32", "r16", "r32", "playoff", "play-off", "knockout"])
+    is_knockout = is_semi or is_quarter or any(k in combined for k in [
+        "round of 16", "round of 8", "round of 32", "r16", "r32", "playoff", "play-off", "knockout"
+    ])
 
     # 1. Full-Day Tournament Streams & Pop-up Channels (EVENTO)
     if any(k in combined for k in ["evento", "sports live", "tv channel"]):
@@ -77,7 +80,7 @@ def get_exact_sport_duration_minutes(match_dict):
         if "judo" in combined or "wrestling" in combined: return 480
         return 960
 
-    # 2. Tennis
+    # 2. Tennis (Standard Match)
     if "tennis" in combined:
         if is_final or any(k in combined for k in ["grand slam", "wimbledon", "us open", "french open", "australian open"]):
             return 330
@@ -85,13 +88,27 @@ def get_exact_sport_duration_minutes(match_dict):
 
     # 3. Cricket
     if "cricket" in combined or "cricket" in cat:
+        # Hong Kong Sixes
+        if any(k in combined for k in ["hong kong sixes", "hk sixes", "hong kong 6s", "hongkong sixes"]):
+            return 570
+
+        # Nepal Premier League (NPL) - Time slot based duration
+        if "nepal premier" in combined or "npl" in combined:
+            t_str = str(match_dict.get("time") or match_dict.get("start_time") or "").lower()
+            if any(slot in t_str for slot in ["12:", "01:", "1:", "11:"]):
+                return 510
+            return 230
+
         if any(k in combined for k in ["test", "ranji", "sheffield", "county", "4-day", "four day"]):
             return 540
         if any(k in combined for k in ["odi", "one day", "50 over", "world cup", "trophy", "u19"]):
             return 540 if is_final else 510
         if "ipl" in combined or "indian premier" in combined:
             return 260 if is_final else 240
-        if any(k in combined for k in ["t20", "bpl", "psl", "bbl", "big bash", "cpl", "sa20", "mlc", "ilt20", "legends", "road safety", "wcl", "super smash"]):
+        if any(k in combined for k in [
+            "t20", "bpl", "psl", "bbl", "big bash", "cpl", "sa20", 
+            "mlc", "ilt20", "legends", "road safety", "wcl", "super smash"
+        ]):
             return 260 if is_final else 230
         if "hundred" in combined: return 160
         if "t15" in combined: return 140
@@ -126,10 +143,10 @@ def get_exact_sport_duration_minutes(match_dict):
     if "boxing" in combined: return 210
 
     # 9. Motorsports
-    if "formula 1" in combined or "f1" in combined: return 140
-    if "motogp" in combined or "sbk" in combined: return 70
-    if "nascar" in combined: return 240
-    if "wrc" in combined or "rally" in combined: return 360
+    if "formula 1" in combined or "f1" in combined: return 420
+    if any(k in combined for k in ["motogp", "motorgp", "sbk"]): return 480
+    if "nascar" in combined: return 300
+    if "wrc" in combined or "rally" in combined: return 480
 
     # 10. Others
     if "horse racing" in combined or "horse" in combined: return 600
@@ -139,7 +156,8 @@ def get_exact_sport_duration_minutes(match_dict):
     if "hockey" in combined or "nhl" in combined: return 180
     if "kabaddi" in combined: return 70
 
-    return 180
+    # Worker default fallback
+    return 160
 
 def parse_feed_time_to_bd(date_str, time_str):
     now_dt = datetime.now(BD_TZ)
@@ -152,10 +170,7 @@ def parse_feed_time_to_bd(date_str, time_str):
 
         parts = [int(p) for p in re.findall(r'\d+', date_str)]
         if len(parts) >= 3:
-            if parts[0] > 1000:
-                year, month, day = parts[0], parts[1], parts[2]
-            else:
-                day, month, year = parts[0], parts[1], parts[2]
+            year, month, day = (parts[0], parts[1], parts[2]) if parts[0] > 1000 else (parts[2], parts[1], parts[0])
         else:
             return datetime.now(timezone.utc), now_dt
 
@@ -174,12 +189,17 @@ def parse_saved_bd_dt(date_str, time_str):
     try:
         date_str = str(date_str).strip()
         time_str = str(time_str).strip() if time_str else "00:00:00"
+
+        for fmt in ("%d/%m/%Y %I:%M:%S %p", "%d/%m/%Y %I:%M %p", "%d-%m-%Y %I:%M:%S %p", "%Y-%m-%d %H:%M:%S"):
+            try:
+                dt = datetime.strptime(f"{date_str} {time_str}", fmt)
+                return dt.replace(tzinfo=BD_TZ)
+            except ValueError:
+                pass
+
         parts = [int(p) for p in re.findall(r'\d+', date_str)]
         if len(parts) >= 3:
-            if parts[0] > 1000:
-                y, m, d = parts[0], parts[1], parts[2]
-            else:
-                d, m, y = parts[0], parts[1], parts[2]
+            y, m, d = (parts[0], parts[1], parts[2]) if parts[0] > 1000 else (parts[2], parts[1], parts[0])
         else:
             return None
 
@@ -191,7 +211,7 @@ def parse_saved_bd_dt(date_str, time_str):
         lower_t = time_str.lower()
         if "pm" in lower_t and hh < 12:
             hh += 12
-        if "am" in lower_t and hh == 12:
+        elif "am" in lower_t and hh == 12:
             hh = 0
 
         return datetime(y, m, d, hh, mm, ss, tzinfo=BD_TZ)
@@ -199,10 +219,9 @@ def parse_saved_bd_dt(date_str, time_str):
         return None
 
 def get_my_saved_events():
-    token = generate_security_token()
-    payload = {"from": "events", "requestData": token}
+    payload = {"from": "events", "requestData": generate_security_token()}
     try:
-        res = requests.post(BASE_URL + "admin/select", json=payload, headers=get_headers(), timeout=20)
+        res = session.post(BASE_URL + "admin/select", json=payload, timeout=20)
         if res.status_code == 200:
             data = res.json()
             if isinstance(data, list):
@@ -218,6 +237,7 @@ def get_my_saved_events():
 def remove_duplicate_events_step(my_events):
     seen = {}
     deleted_dup = 0
+    clean_events = []
 
     for item_db in my_events:
         event_id = item_db.get("id")
@@ -240,6 +260,7 @@ def remove_duplicate_events_step(my_events):
         elif title:
             match_key = (title,)
         else:
+            clean_events.append(item_db)
             continue
 
         if match_key in seen:
@@ -248,21 +269,23 @@ def remove_duplicate_events_step(my_events):
                 "requestData": generate_security_token()
             }
             try:
-                del_res = requests.post(BASE_URL + "admin/delete_event", json=del_payload, headers=get_headers(), timeout=12)
+                del_res = session.post(BASE_URL + "admin/delete_event", json=del_payload, timeout=10)
                 if del_res.status_code in [200, 201]:
                     deleted_dup += 1
                     print(f"[Duplicate Removed] ID: {event_id} | {t_a} vs {t_b}")
-                    time.sleep(0.8)
+                    time.sleep(0.3)
             except Exception as e:
                 print(f"Error removing duplicate {event_id}:", e)
         else:
             seen[match_key] = event_id
+            clean_events.append(item_db)
 
-    return deleted_dup
+    return clean_events, deleted_dup
 
 def delete_expired_events_step(my_events):
     now_bd = datetime.now(BD_TZ)
     finished_list = []
+    active_events = []
 
     for item_db in my_events:
         event_id = item_db.get("id")
@@ -279,10 +302,12 @@ def delete_expired_events_step(my_events):
         date_str = ev_data.get("date") or item_db.get("date")
         time_str = ev_data.get("time") or item_db.get("time")
         if not date_str:
+            active_events.append(item_db)
             continue
 
         match_dt = parse_saved_bd_dt(date_str, time_str)
         if not match_dt:
+            active_events.append(item_db)
             continue
 
         end_time_str = ev_data.get("end_time") or item_db.get("end_time")
@@ -299,13 +324,16 @@ def delete_expired_events_step(my_events):
             finished_list.append({
                 "id": event_id,
                 "end_dt": end_dt,
+                "raw_item": item_db,
                 "t_a": ev_data.get("teamAName") or item_db.get("teamAName") or "Event",
                 "t_b": ev_data.get("teamBName") or item_db.get("teamBName") or ""
             })
+        else:
+            active_events.append(item_db)
 
     finished_list.sort(key=lambda x: x["end_dt"], reverse=True)
 
-    # Retain the latest 50 finished matches and delete older ones
+    kept_finished = finished_list[:KEEP_FINISHED_LIMIT]
     to_delete = finished_list[KEEP_FINISHED_LIMIT:]
     deleted_count = 0
 
@@ -315,17 +343,17 @@ def delete_expired_events_step(my_events):
             "requestData": generate_security_token()
         }
         try:
-            del_res = requests.post(BASE_URL + "admin/delete_event", json=del_payload, headers=get_headers(), timeout=12)
+            del_res = session.post(BASE_URL + "admin/delete_event", json=del_payload, timeout=10)
             if del_res.status_code in [200, 201]:
                 deleted_count += 1
                 print(f"[Auto Deleted Old Finished] ID: {item['id']} | {item['t_a']} vs {item['t_b']}")
-                time.sleep(0.8)
+                time.sleep(0.3)
         except Exception as e:
             print(f"Error deleting event {item['id']}:", e)
 
-    return deleted_count
+    retained_events = active_events + [f["raw_item"] for f in kept_finished]
+    return retained_events, deleted_count
 
-# Links branding formatter (Transforms STREAM TV, HD, etc. into DLSPORTS)
 def format_links_data(streaming_links):
     formatted = []
     if not streaming_links or not isinstance(streaming_links, list):
@@ -339,17 +367,26 @@ def format_links_data(streaming_links):
         url = str(item.get("link") or item.get("url") or "").strip()
 
         ua = "Mozilla/5.0"
-        if "|user-agent=" in url:
-            parts = url.split("|user-agent=")
-            url = parts[0]
-            ua = parts[1]
+        headers_dict = {"User-Agent": ua}
+
+        # Handling URL pipes
+        if "|" in url:
+            pipe_parts = url.split("|")
+            url = pipe_parts[0]
+            for param in pipe_parts[1:]:
+                if "=" in param:
+                    k, v = param.split("=", 1)
+                    k_clean = k.strip()
+                    v_clean = v.strip()
+                    headers_dict[k_clean] = v_clean
+                    if k_clean.lower() == "user-agent":
+                        ua = v_clean
 
         api_key = str(item.get("api") or item.get("drmKey") or item.get("key") or item.get("license") or "").strip()
         token_api = str(item.get("tokenApi") or "").strip()
 
         if url.startswith("http"):
             is_mpd = ".mpd" in url.lower()
-
             upper_raw = raw_name.upper().replace(" ", "")
             if any(x in upper_raw for x in ["HD", "FHD", "1080"]):
                 display_name = f"DLSPORTS HD {idx + 1}"
@@ -363,7 +400,7 @@ def format_links_data(streaming_links):
                 "link": url,
                 "url": url,
                 "stream_url": url,
-                "headers": {"User-Agent": ua},
+                "headers": headers_dict,
                 "user_agent": ua,
                 "type": "mpd" if is_mpd else "m3u8",
                 "api": api_key,
@@ -398,7 +435,6 @@ def add_new_events_step(live_feed, my_events):
         if match_utc_dt <= now_utc and raw_status in ["live_ended", "finished", "ended"]:
             continue
 
-        # Real-time GeeSports end-time detection
         feed_end_utc, feed_end_bd = parse_feed_time_to_bd(feed_match.get("end_date"), feed_match.get("end_time"))
         if feed_end_utc and feed_end_utc > match_utc_dt:
             end_dt = feed_end_bd
@@ -493,20 +529,17 @@ def add_new_events_step(live_feed, my_events):
         for attempt in range(3):
             try:
                 insert_payload["requestData"] = generate_security_token()
-                in_res = requests.post(BASE_URL + "admin/add_event", json=insert_payload, headers=get_headers(), timeout=15)
+                in_res = session.post(BASE_URL + "admin/add_event", json=insert_payload, timeout=15)
                 if in_res.status_code in [200, 201]:
                     added_count += 1
                     print(f"[Added Event {added_count}/{MAX_ADD_PER_RUN}] {t_a_raw} vs {t_b_raw} | Links: {len(formatted_links)}")
-                    my_events.append(new_event_dict)
                     success = True
-                    time.sleep(1.5)
+                    time.sleep(1.0)
                     break
                 else:
-                    print(f"[Add Failed Attempt {attempt+1}] {t_a_raw} vs {t_b_raw} | HTTP {in_res.status_code}: {in_res.text[:140]}")
-                    time.sleep(1.2)
+                    time.sleep(1.0)
             except Exception as ex:
-                print(f"[Add Exception Attempt {attempt+1}] {t_a_raw} vs {t_b_raw}: {ex}")
-                time.sleep(1.2)
+                time.sleep(1.0)
 
         if not success:
             print(f"[Skipped/Failed] {t_a_raw} vs {t_b_raw}")
@@ -520,14 +553,16 @@ def sync_streaming_links_step(live_feed, my_events):
     for f in live_feed:
         t_a = clean_name(f.get("teamAName") or f.get("teamA") or "")
         t_b = clean_name(f.get("teamBName") or f.get("teamB") or "")
+        cat = clean_name(f.get("category") or "")
+        title = clean_name(f.get("eventName") or f.get("name") or "")
         links = f.get("streaming_links") or f.get("links") or []
         raw_status = str(f.get("matchStatus") or f.get("status") or "").lower()
 
         indexed_feed.append({
             "teamA": t_a,
             "teamB": t_b,
-            "raw_teamA": f.get("teamAName") or f.get("teamA"),
-            "raw_teamB": f.get("teamBName") or f.get("teamB"),
+            "category": cat,
+            "title": title,
             "streaming_links": links,
             "status": raw_status,
             "raw_feed": f
@@ -537,6 +572,8 @@ def sync_streaming_links_step(live_feed, my_events):
 
     for item_db in my_events:
         event_id = item_db.get("id")
+        if not event_id:
+            continue
 
         ev_data = item_db
         if "event" in item_db and isinstance(item_db["event"], str):
@@ -547,17 +584,18 @@ def sync_streaming_links_step(live_feed, my_events):
 
         my_a = clean_name(ev_data.get("teamAName") or item_db.get("teamAName"))
         my_b = clean_name(ev_data.get("teamBName") or item_db.get("teamBName"))
+        my_title = clean_name(ev_data.get("eventName") or ev_data.get("tournament") or ev_data.get("title"))
 
-        if not my_a or my_a in ["teama", "livematch"]:
+        if not my_a and not my_title:
             continue
 
         matched_match = None
         for inf in indexed_feed:
-            both_match = (my_a == inf["teamA"] and my_b == inf["teamB"]) or (my_a == inf["teamB"] and my_b == inf["teamA"])
-            single_strong_a = len(my_a) >= 5 and (my_a == inf["teamA"] or my_a == inf["teamB"])
-            single_strong_b = len(my_b) >= 5 and (my_b == inf["teamA"] or my_b == inf["teamB"])
-
-            if both_match or (single_strong_a and single_strong_b) or (single_strong_a and not inf["teamB"]):
+            if my_a and my_b and inf["teamA"] and inf["teamB"]:
+                if (my_a == inf["teamA"] and my_b == inf["teamB"]) or (my_a == inf["teamB"] and my_b == inf["teamA"]):
+                    matched_match = inf
+                    break
+            elif my_title and inf["title"] and my_title == inf["title"]:
                 matched_match = inf
                 break
 
@@ -572,7 +610,7 @@ def sync_streaming_links_step(live_feed, my_events):
         ev_data["time"] = correct_time_str
         ev_data["date"] = correct_date_str
 
-        # Instant End: Feed marks match as finished/live_ended -> expire end_time immediately
+        # Instant End Handling
         if matched_match["status"] in ["live_ended", "finished", "ended"]:
             past_dt = now_bd - timedelta(minutes=5)
             ev_data["end_date"] = past_dt.strftime("%d/%m/%Y")
@@ -600,7 +638,7 @@ def sync_streaming_links_step(live_feed, my_events):
         }
 
         try:
-            up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
+            up_res = session.post(BASE_URL + "admin/update_event", json=payload, timeout=12)
             if up_res.status_code == 200:
                 print(f"[Updated] ID: {event_id} | {ev_data.get('teamAName')} vs {ev_data.get('teamBName')} | Status: {matched_match['status']}")
                 updated_count += 1
@@ -621,19 +659,13 @@ def run_single_sync_cycle():
     print(f"Total Events currently in Panel: {len(my_events)}")
 
     # 1. Deduplicate events
-    dup_removed = remove_duplicate_events_step(my_events)
-    if dup_removed > 0:
-        time.sleep(1.5)
-        my_events = get_my_saved_events()
+    my_events, dup_removed = remove_duplicate_events_step(my_events)
 
     # 2. Retain 50 finished and purge older entries
-    deleted = delete_expired_events_step(my_events)
-    if deleted > 0:
-        time.sleep(1.5)
-        my_events = get_my_saved_events()
+    my_events, deleted = delete_expired_events_step(my_events)
 
     try:
-        res = requests.get(FEED_SOURCE, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+        res = session.get(FEED_SOURCE, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
         if res.status_code != 200:
             print("Feed fetch failed:", res.status_code)
             return
@@ -647,11 +679,12 @@ def run_single_sync_cycle():
     # 3. Add max 5 new events per execution cycle
     added = add_new_events_step(live_feed, my_events)
 
+    # 4. Refresh list once if new events were added to obtain database IDs
     if added > 0:
-        time.sleep(1.5)
+        time.sleep(1.0)
         my_events = get_my_saved_events()
 
-    # 4. Sync streaming links and status
+    # 5. Sync streaming links and status
     updated = sync_streaming_links_step(live_feed, my_events)
 
     print("==========================================")
@@ -659,12 +692,10 @@ def run_single_sync_cycle():
     print("==========================================")
 
 def main():
-    # GitHub Actions single-run trigger
     if os.getenv("GITHUB_ACTIONS") == "true" or os.getenv("SINGLE_RUN") == "true":
         run_single_sync_cycle()
         return
 
-    # Continuous 5-minute loop for Termux / VPS
     print("Starting Continuous Auto-Sync Engine (5-minute loop)...")
     while True:
         try:
