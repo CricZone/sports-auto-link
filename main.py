@@ -5,29 +5,16 @@ import base64
 from datetime import datetime, timezone, timedelta
 import json
 import re
-import urllib.parse
 import requests
 
 BASE_URL = "https://dlsports.proapp.workers.dev/"
-FEED_SOURCE = os.getenv("SECRET_FEED_SOURCE", "https://s1.noobon.top/axsx/streamx.php")
+FEED_SOURCE = os.getenv("SECRET_FEED_SOURCE", "")
 
-# Bangladesh Timezone (UTC+6)
-BD_TZ = timezone(timedelta(hours=6))
+# আপকামিং ম্যাচ প্রতি রানে ধাপে ধাপে অ্যাড হওয়ার সীমা
+MAX_UPCOMING_ADD_PER_RUN = 6
 
-# Limits & Intervals
-MAX_ADD_PER_RUN = 10  # প্রতি রানে সর্বোচ্চ ১০টি নতুন ম্যাচ অ্যাড করবে
-KEEP_FINISHED_LIMIT = 50
-LOOP_INTERVAL_SECONDS = 300
-
-session = requests.Session()
-
-def get_headers():
-    return {
-        "Content-Type": "application/json; charset=utf-8",
-        "User-Agent": "okhttp/4.9.2"
-    }
-
-session.headers.update(get_headers())
+# Finished ট্যাবে সবসময় সাম্প্রতিক ১২টি সমাপ্ত ম্যাচ থাকবে
+KEEP_FINISHED_LIMIT = 12
 
 def generate_security_token():
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -36,30 +23,23 @@ def generate_security_token():
     hex_str = "".join(f"{b:02x}" for b in rev1.encode("utf-8"))
     return hex_str[::-1]
 
+def get_headers():
+    return {
+        "Content-Type": "application/json; charset=utf-8",
+        "User-Agent": "okhttp/4.9.2"
+    }
+
 def clean_name(val):
     if not val:
         return ""
-    w = str(val).lower().strip()
+    w = str(val).lower()
     w = re.sub(r'\b(fc|cf|sc|united|city|club|women|vs|v)\b', '', w)
     return re.sub(r'[^a-z0-9]', '', w).strip()
-
-def replace_banned_names(val):
-    if not val or not isinstance(val, str):
-        return str(val or "")
-    return re.sub(r'israel', 'Mother*fucker', val, flags=re.IGNORECASE)
 
 def fix_image_url(url):
     if not url or not isinstance(url, str):
         return "https://i.postimg.cc/0Qs5rKL8/app-logo.png"
     url = url.strip()
-    if "images.weserv.nl" in url:
-        try:
-            m = re.search(r'[?&]url=([^&]+)', url)
-            if m and m.group(1):
-                extracted = urllib.parse.unquote(m.group(1))
-                url = extracted if extracted.startswith("http") else f"https://{extracted}"
-        except Exception:
-            pass
     if not url.startswith("http://") and not url.startswith("https://"):
         return "https://i.postimg.cc/0Qs5rKL8/app-logo.png"
     if url.startswith("http://"):
@@ -68,108 +48,11 @@ def fix_image_url(url):
         url = url.replace("api.sofascore.com", "img.sofascore.com")
     return url
 
-def get_match_banner_image_16x9(logo1, logo2, tournament_logo=""):
-    l1 = fix_image_url(logo1)
-    l2 = fix_image_url(logo2)
-    def_logo = "https://i.postimg.cc/0Qs5rKL8/app-logo.png"
-
-    if l1 != def_logo and l2 != def_logo and l1.startswith("http") and l2.startswith("http"):
-        clean_l1 = urllib.parse.quote(re.sub(r'^https?://', '', l1))
-        clean_l2 = urllib.parse.quote(re.sub(r'^https?://', '', l2))
-        return f"https://images.weserv.nl/?url={clean_l1}&w=1280&h=720&fit=contain&cbg=070e0a&overlay=https://{clean_l2}&overlay-align=right&overlay-pad=80&output=png"
-
-    single = l1 if l1 != def_logo else (l2 if l2 != def_logo else tournament_logo)
-    if single and single.startswith("http"):
-        clean_s = urllib.parse.quote(re.sub(r'^https?://', '', single))
-        return f"https://images.weserv.nl/?url={clean_s}&w=1280&h=720&fit=contain&cbg=070e0a&output=png"
-
-    return def_logo
-
-def get_exact_sport_duration_minutes(match_dict):
-    cat = str(match_dict.get("category") or "").lower()
-    tour = str(match_dict.get("tournament") or match_dict.get("tournament_name") or match_dict.get("eventName") or match_dict.get("name") or "").lower()
-    t1 = str(match_dict.get("team1_name") or match_dict.get("team1") or match_dict.get("teamAName") or match_dict.get("teamA") or "").lower()
-    t2 = str(match_dict.get("team2_name") or match_dict.get("team2") or match_dict.get("teamBName") or match_dict.get("teamB") or "").lower()
-    title = str(match_dict.get("title") or "").lower()
-    combined = f"{cat} {tour} {title} {t1} {t2}"
-
-    is_final = "final" in combined and "semi" not in combined and "quarter" not in combined
-    is_semi = "semi" in combined
-    is_quarter = "quarter" in combined
-    is_knockout = is_semi or is_quarter or any(k in combined for k in ["round of 16", "round of 8", "round of 32", "r16", "r32", "playoff", "play-off", "knockout"])
-
-    if any(k in combined for k in ["evento", "sports live", "tv channel"]):
-        if "tennis" in combined: return 960
-        if "cycling" in combined: return 480
-        if "golf" in combined: return 720
-        if "table tennis" in combined or "tabel tennis" in combined: return 480
-        if "judo" in combined or "wrestling" in combined: return 480
-        return 960
-
-    if "tennis" in combined:
-        return 330 if (is_final or any(k in combined for k in ["grand slam", "wimbledon", "us open", "french open", "australian open"])) else 240
-
-    if "cricket" in combined or "cricket" in cat:
-        if any(k in combined for k in ["hong kong sixes", "hk sixes", "hong kong 6s", "hongkong sixes"]):
-            return 570
-        if "nepal premier" in combined or "npl" in combined:
-            t_str = str(match_dict.get("time") or match_dict.get("start_time") or "").lower()
-            if any(h in t_str for h in ["12:", "01:", "1:", "11:"]):
-                return 510
-            return 230
-        if any(k in combined for k in ["test", "ranji", "sheffield", "county", "4-day", "four day"]):
-            return 540
-        if any(k in combined for k in ["odi", "one day", "50 over", "world cup", "trophy", "u19"]):
-            return 540 if is_final else 510
-        if "ipl" in combined or "indian premier" in combined:
-            return 260 if is_final else 240
-        if any(k in combined for k in ["t20", "bpl", "psl", "bbl", "big bash", "cpl", "sa20", "mlc", "ilt20", "legends", "road safety", "wcl", "super smash"]):
-            return 260 if is_final else 230
-        if "hundred" in combined: return 160
-        if "t15" in combined: return 140
-        if any(k in combined for k in ["t10", "ten10", "abu dhabi"]): return 100
-        if "t5" in combined or "sixes" in combined: return 60
-        return 230
-
-    if "football" in combined or "soccer" in combined or "football" in cat:
-        if is_final: return 210
-        if is_knockout: return 195
-        return 180
-
-    if any(k in combined for k in ["nfl", "american football", "cfl", "ncaa"]):
-        return 400 if is_final else 360
-
-    if any(k in combined for k in ["nba", "basketball", "fiba", "euroleague"]):
-        return 210 if (is_final or is_knockout) else 180
-
-    if any(k in combined for k in ["baseball", "mlb", "npb", "kbo"]):
-        return 220
-
-    if any(k in combined for k in ["wwe", "raw", "smackdown", "nxt", "aew", "tna", "wrestling"]):
-        if "raw" in combined: return 200
-        if any(k in combined for k in ["ple", "wrestlemania", "royal rumble", "summer slam"]): return 260
-        return 150
-    if any(k in combined for k in ["ufc", "mma", "one fight", "bellator"]): return 240
-    if "boxing" in combined: return 210
-
-    if "formula 1" in combined or "f1" in combined: return 420
-    if any(k in combined for k in ["motogp", "motorgp", "sbk"]): return 480
-    if "nascar" in combined: return 300
-    if "wrc" in combined or "rally" in combined: return 480
-
-    if "horse racing" in combined or "horse" in combined: return 600
-    if "racing" in combined: return 480
-    if "snooker" in combined: return 270
-    if "darts" in combined or "pdc" in combined: return 140
-    if "hockey" in combined or "nhl" in combined: return 180
-    if "kabaddi" in combined: return 70
-
-    return 160
-
-def parse_feed_time_to_bd(date_str, time_str):
-    now_dt = datetime.now(BD_TZ)
+# ফিডের আন্তর্জাতিক UTC সময় পার্সার
+def parse_feed_utc_dt(date_str, time_str):
+    now_utc = datetime.now(timezone.utc)
     if not date_str:
-        return datetime.now(timezone.utc), now_dt
+        return now_utc
 
     try:
         date_str = str(date_str).strip()
@@ -177,80 +60,41 @@ def parse_feed_time_to_bd(date_str, time_str):
 
         parts = [int(p) for p in re.findall(r'\d+', date_str)]
         if len(parts) >= 3:
-            year, month, day = (parts[0], parts[1], parts[2]) if parts[0] > 1000 else (parts[2], parts[1], parts[0])
+            if parts[0] > 1000:
+                year, month, day = parts[0], parts[1], parts[2]
+            else:
+                day, month, year = parts[0], parts[1], parts[2]
         else:
-            return datetime.now(timezone.utc), now_dt
+            return now_utc
 
         t_parts = [int(p) for p in re.findall(r'\d+', time_str)]
         hh = t_parts[0] if len(t_parts) > 0 else 0
         mm = t_parts[1] if len(t_parts) > 1 else 0
         ss = t_parts[2] if len(t_parts) > 2 else 0
 
-        lower_t = time_str.lower()
-        if "pm" in lower_t and hh < 12:
-            hh += 12
-        elif "am" in lower_t and hh == 12:
-            hh = 0
-
-        match_utc_dt = datetime(year, month, day, hh, mm, ss, tzinfo=timezone.utc)
-        match_bd_dt = match_utc_dt.astimezone(BD_TZ)
-        return match_utc_dt, match_bd_dt
+        return datetime(year, month, day, hh, mm, ss, tzinfo=timezone.utc)
     except Exception:
-        return datetime.now(timezone.utc), now_dt
-
-def parse_saved_bd_dt(date_str, time_str):
-    try:
-        date_str = str(date_str).strip()
-        time_str = str(time_str).strip() if time_str else "00:00:00"
-
-        for fmt in ("%d/%m/%Y %I:%M:%S %p", "%d/%m/%Y %I:%M %p", "%d-%m-%Y %I:%M:%S %p", "%Y-%m-%d %H:%M:%S"):
-            try:
-                dt = datetime.strptime(f"{date_str} {time_str}", fmt)
-                return dt.replace(tzinfo=BD_TZ)
-            except ValueError:
-                pass
-
-        parts = [int(p) for p in re.findall(r'\d+', date_str)]
-        if len(parts) >= 3:
-            y, m, d = (parts[0], parts[1], parts[2]) if parts[0] > 1000 else (parts[2], parts[1], parts[0])
-        else:
-            return None
-
-        t_parts = [int(p) for p in re.findall(r'\d+', time_str)]
-        hh = t_parts[0] if len(t_parts) > 0 else 0
-        mm = t_parts[1] if len(t_parts) > 1 else 0
-        ss = t_parts[2] if len(t_parts) > 2 else 0
-
-        lower_t = time_str.lower()
-        if "pm" in lower_t and hh < 12:
-            hh += 12
-        elif "am" in lower_t and hh == 12:
-            hh = 0
-
-        return datetime(y, m, d, hh, mm, ss, tzinfo=BD_TZ)
-    except Exception:
-        return None
+        return now_utc
 
 def get_my_saved_events():
-    payload = {"from": "events", "requestData": generate_security_token()}
+    token = generate_security_token()
+    payload = {"from": "events", "requestData": token}
     try:
-        res = session.post(BASE_URL + "admin/select", json=payload, timeout=20)
+        res = requests.post(BASE_URL + "admin/select", json=payload, headers=get_headers(), timeout=20)
         if res.status_code == 200:
             data = res.json()
             if isinstance(data, list):
                 return data
             elif isinstance(data, dict):
                 return data.get("events") or data.get("data") or []
-        else:
-            print(f"[Panel Error] admin/select HTTP {res.status_code}: {res.text[:180]}")
     except Exception as e:
-        print(f"[Panel Connection Error] admin/select: {e}")
+        print("Error fetching saved events:", e)
     return []
 
+# ১. ডুপ্লিকেট ম্যাচ পরিষ্কার করা
 def remove_duplicate_events_step(my_events):
     seen = {}
     deleted_dup = 0
-    clean_events = []
 
     for item_db in my_events:
         event_id = item_db.get("id")
@@ -266,14 +110,13 @@ def remove_duplicate_events_step(my_events):
 
         t_a = clean_name(ev_data.get("teamAName") or item_db.get("teamAName") or ev_data.get("team1"))
         t_b = clean_name(ev_data.get("teamBName") or item_db.get("teamBName") or ev_data.get("team2"))
-        title = clean_name(ev_data.get("eventName") or ev_data.get("tournament") or ev_data.get("title"))
+        title = clean_name(ev_data.get("eventName") or item_db.get("eventName") or ev_data.get("tournament"))
 
-        if t_a and t_b and t_a != t_b:
+        if t_a and t_b:
             match_key = tuple(sorted([t_a, t_b]))
         elif title:
             match_key = (title,)
         else:
-            clean_events.append(item_db)
             continue
 
         if match_key in seen:
@@ -282,23 +125,33 @@ def remove_duplicate_events_step(my_events):
                 "requestData": generate_security_token()
             }
             try:
-                del_res = session.post(BASE_URL + "admin/delete_event", json=del_payload, timeout=10)
+                del_res = requests.post(BASE_URL + "admin/delete_event", json=del_payload, headers=get_headers(), timeout=12)
                 if del_res.status_code in [200, 201]:
                     deleted_dup += 1
                     print(f"[Duplicate Removed] ID: {event_id} | {t_a} vs {t_b}")
-                    time.sleep(0.3)
+                    time.sleep(0.8)
             except Exception as e:
                 print(f"Error removing duplicate {event_id}:", e)
         else:
             seen[match_key] = event_id
-            clean_events.append(item_db)
 
-    return clean_events, deleted_dup
+    return deleted_dup
 
-def delete_expired_events_step(my_events):
-    now_bd = datetime.now(BD_TZ)
+# ২. সম্পূর্ণ API নির্ভর Finished ইভেন্ট ম্যানেজমেন্ট (Duration মুক্ত)
+def manage_finished_events_step(my_events, live_feed):
     finished_list = []
-    active_events = []
+    
+    # বর্তমান লাইভ ফিডের ম্যাচগুলোর কী (Key) তৈরি করা
+    live_feed_keys = set()
+    for f in live_feed:
+        t_a = clean_name(f.get("teamAName") or f.get("teamA") or f.get("team1"))
+        t_b = clean_name(f.get("teamBName") or f.get("teamB") or f.get("team2"))
+        title = clean_name(f.get("eventName") or f.get("name") or f.get("title"))
+        
+        if t_a and t_b:
+            live_feed_keys.add(tuple(sorted([t_a, t_b])))
+        if title:
+            live_feed_keys.add((title,))
 
     for item_db in my_events:
         event_id = item_db.get("id")
@@ -312,41 +165,26 @@ def delete_expired_events_step(my_events):
             except Exception:
                 pass
 
-        date_str = ev_data.get("date") or item_db.get("date")
-        time_str = ev_data.get("time") or item_db.get("time")
-        if not date_str:
-            active_events.append(item_db)
-            continue
+        db_a = clean_name(ev_data.get("teamAName") or item_db.get("teamAName") or ev_data.get("team1"))
+        db_b = clean_name(ev_data.get("teamBName") or item_db.get("teamBName") or ev_data.get("team2"))
+        db_title = clean_name(ev_data.get("eventName") or item_db.get("eventName") or ev_data.get("tournament"))
 
-        match_dt = parse_saved_bd_dt(date_str, time_str)
-        if not match_dt:
-            active_events.append(item_db)
-            continue
+        is_in_api = False
+        if db_a and db_b and tuple(sorted([db_a, db_b])) in live_feed_keys:
+            is_in_api = True
+        elif db_title and (db_title,) in live_feed_keys:
+            is_in_api = True
 
-        end_time_str = ev_data.get("end_time") or item_db.get("end_time")
-        end_date_str = ev_data.get("end_date") or item_db.get("end_date")
-
-        if end_date_str and end_time_str:
-            end_dt = parse_saved_bd_dt(end_date_str, end_time_str)
-            if not end_dt:
-                end_dt = match_dt + timedelta(minutes=get_exact_sport_duration_minutes(ev_data))
-        else:
-            end_dt = match_dt + timedelta(minutes=get_exact_sport_duration_minutes(ev_data))
-
-        if end_dt < now_bd:
+        # যদি API-তে ম্যাচটি না থাকে, তবে সেটি Finished
+        if not is_in_api:
             finished_list.append({
                 "id": event_id,
-                "end_dt": end_dt,
-                "raw_item": item_db,
+                "created_at": ev_data.get("created_at") or 0,
                 "t_a": ev_data.get("teamAName") or item_db.get("teamAName") or "Event",
                 "t_b": ev_data.get("teamBName") or item_db.get("teamBName") or ""
             })
-        else:
-            active_events.append(item_db)
 
-    finished_list.sort(key=lambda x: x["end_dt"], reverse=True)
-
-    kept_finished = finished_list[:KEEP_FINISHED_LIMIT]
+    # পুরোনো ফিনিশড ম্যাচগুলো চিহ্নিত করে মুছে ফেলা
     to_delete = finished_list[KEEP_FINISHED_LIMIT:]
     deleted_count = 0
 
@@ -356,124 +194,86 @@ def delete_expired_events_step(my_events):
             "requestData": generate_security_token()
         }
         try:
-            del_res = session.post(BASE_URL + "admin/delete_event", json=del_payload, timeout=10)
+            del_res = requests.post(BASE_URL + "admin/delete_event", json=del_payload, headers=get_headers(), timeout=12)
             if del_res.status_code in [200, 201]:
                 deleted_count += 1
-                print(f"[Auto Deleted Old Finished] ID: {item['id']} | {item['t_a']} vs {item['t_b']}")
-                time.sleep(0.3)
+                print(f"[API Removed - Deleted Old Finished] ID: {item['id']} | {item['t_a']} vs {item['t_b']}")
+                time.sleep(0.8)
         except Exception as e:
             print(f"Error deleting event {item['id']}:", e)
 
-    retained_events = active_events + [f["raw_item"] for f in kept_finished]
-    return retained_events, deleted_count
+    return deleted_count
 
 def format_links_data(streaming_links):
     formatted = []
     if not streaming_links or not isinstance(streaming_links, list):
         return formatted
 
+    dlsports_counter = 1
+
     for idx, item in enumerate(streaming_links):
         if not isinstance(item, dict):
             continue
 
-        raw_name = str(item.get("name") or item.get("title") or "").strip()
-        url = str(item.get("link") or item.get("url") or item.get("stream") or item.get("src") or "").strip()
-        if not url:
-            continue
-
-        upper_raw = raw_name.upper().replace(" ", "")
-        if "STREAMTV" in upper_raw:
-            display_name = f"DLSPORTS {idx + 1}"
-        elif any(k in upper_raw for k in ["LOWQUALITY", "USEVPN", "LINK"]):
-            display_name = f"DLSPORTS {idx + 2 if idx == 0 else idx + 1}"
-        elif any(x in upper_raw for x in ["4K", "UHD"]):
-            display_name = f"DLSPORTS 4K {idx + 1}"
-        elif any(x in upper_raw for x in ["HD", "FHD", "1080"]):
-            display_name = f"DLSPORTS HD {idx + 1}"
+        original_name = str(item.get("name") or f"Server {idx + 1}").strip()
+        url = str(item.get("link") or item.get("url") or "").strip()
+        
+        name_upper = original_name.upper().replace(" ", "")
+        
+        # রিব্র্যান্ডিং লজিক
+        if any(x in name_upper for x in ["LOWQUALITY", "USEVPN", "LINK", "STREAMTV+HD"]):
+            if dlsports_counter == 1:
+                name = "DLSPORTS"
+            else:
+                name = f"DLSPORTS {dlsports_counter}"
+            dlsports_counter += 1
         else:
-            display_name = f"DLSPORTS {idx + 1}"
+            name = original_name
 
         ua = "Mozilla/5.0"
-        headers_dict = {"User-Agent": ua}
-
-        if "|" in url:
-            parts = url.split("|")
+        if "|user-agent=" in url:
+            parts = url.split("|user-agent=")
             url = parts[0]
-            for param in parts[1:]:
-                if "=" in param:
-                    k, v = param.split("=", 1)
-                    k_clean = k.strip()
-                    v_clean = v.strip()
-                    headers_dict[k_clean] = v_clean
-                    if k_clean.lower() == "user-agent":
-                        ua = v_clean
+            ua = parts[1]
 
         api_key = str(item.get("api") or item.get("drmKey") or item.get("key") or item.get("license") or "").strip()
         token_api = str(item.get("tokenApi") or "").strip()
 
-        if api_key and ":" in api_key:
-            url += f"|drmScheme=clearkey&drmLicense={api_key}"
-
         if url.startswith("http"):
             is_mpd = ".mpd" in url.lower()
             formatted.append({
-                "name": display_name,
+                "name": name,
                 "link": url,
                 "url": url,
                 "stream_url": url,
-                "headers": headers_dict,
+                "headers": {"User-Agent": ua},
                 "user_agent": ua,
                 "type": "mpd" if is_mpd else "m3u8",
                 "api": api_key,
                 "tokenApi": token_api,
                 "key": api_key,
-                "drmKey": api_key,
-                "is_auto": True
+                "drmKey": api_key
             })
     return formatted
 
-def add_new_events_step(live_feed, my_events):
-    now_bd = datetime.now(BD_TZ)
-    added_count = 0
+# ৩. লাইভ ম্যাচ আগে এবং এরপর আপকামিং ম্যাচ ক্রমান্বয়ে অ্যাড করা
+def add_events_step(live_feed, my_events):
+    now_utc = datetime.now(timezone.utc)
 
-    print(f"\n--- Checking {len(live_feed)} Matches for Addition ---")
+    live_candidates = []
+    upcoming_candidates = []
 
     for feed_match in live_feed:
-        if added_count >= MAX_ADD_PER_RUN:
-            break
-
         if not isinstance(feed_match, dict):
             continue
 
-        raw_status = str(feed_match.get("matchStatus") or feed_match.get("status") or "").lower().strip()
-        if raw_status in ["live_ended", "finished", "ended", "completed", "ft", "aet"]:
-            continue
+        date_val = feed_match.get("date")
+        time_val = feed_match.get("time")
+        match_utc_dt = parse_feed_utc_dt(date_val, time_val)
 
-        date_val = feed_match.get("date") or feed_match.get("match_date") or feed_match.get("startDate")
-        time_val = feed_match.get("time") or feed_match.get("match_time") or feed_match.get("startTime")
-        _, match_bd_dt = parse_feed_time_to_bd(date_val, time_val)
-
-        feed_end_utc, feed_end_bd = parse_feed_time_to_bd(
-            feed_match.get("end_date") or feed_match.get("endDate") or date_val,
-            feed_match.get("end_time") or feed_match.get("endTime") or feed_match.get("end")
-        )
-        
-        fallback_dur = get_exact_sport_duration_minutes(feed_match)
-        if feed_end_bd and feed_end_bd > match_bd_dt:
-            end_dt = feed_end_bd
-        elif feed_match.get("duration") and str(feed_match.get("duration")).isdigit():
-            dur = int(feed_match.get("duration"))
-            end_dt = match_bd_dt + timedelta(minutes=dur)
-        else:
-            end_dt = match_bd_dt + timedelta(minutes=fallback_dur)
-
-        # খেলা শেষ হওয়ার ২০ মিনিট পর পর্যন্ত নতুন অ্যাড ব্লক থাকবে
-        if end_dt <= (now_bd - timedelta(minutes=20)):
-            continue
-
-        t_a_raw = replace_banned_names(feed_match.get("teamAName") or feed_match.get("team1") or feed_match.get("team1_name") or feed_match.get("teamA") or "")
-        t_b_raw = replace_banned_names(feed_match.get("teamBName") or feed_match.get("team2") or feed_match.get("team2_name") or feed_match.get("teamB") or "")
-        f_title = replace_banned_names(feed_match.get("eventName") or feed_match.get("name") or feed_match.get("title") or feed_match.get("tournament") or f"{t_a_raw} vs {t_b_raw}")
+        t_a_raw = feed_match.get("teamAName") or feed_match.get("teamA") or feed_match.get("team1") or ""
+        t_b_raw = feed_match.get("teamBName") or feed_match.get("teamB") or feed_match.get("team2") or ""
+        f_title = feed_match.get("eventName") or feed_match.get("name") or f"{t_a_raw} vs {t_b_raw}"
 
         clean_fa = clean_name(t_a_raw)
         clean_fb = clean_name(t_b_raw)
@@ -486,20 +286,16 @@ def add_new_events_step(live_feed, my_events):
         for item_db in my_events:
             ev_data = item_db
             if "event" in item_db and isinstance(item_db["event"], str):
-                try:
-                    ev_data = json.loads(item_db["event"])
-                except Exception:
-                    pass
+                try: ev_data = json.loads(item_db["event"])
+                except Exception: pass
 
             db_a = clean_name(ev_data.get("teamAName") or item_db.get("teamAName") or ev_data.get("team1"))
             db_b = clean_name(ev_data.get("teamBName") or item_db.get("teamBName") or ev_data.get("team2"))
 
-            # উভয় দলের নাম থাকলে সঠিক মিল যাচাই
             if clean_fa and clean_fb and db_a and db_b:
                 if (clean_fa == db_a and clean_fb == db_b) or (clean_fa == db_b and clean_fb == db_a):
                     already_exists = True
                     break
-            # সিঙ্গেল ইভেন্টের ক্ষেত্রে শুধুমাত্র নির্ভুল টাইটেল ম্যাচিং
             elif not clean_fb and not db_b:
                 db_title = clean_name(ev_data.get("eventName") or ev_data.get("tournament") or ev_data.get("title"))
                 if clean_ftitle and db_title and clean_ftitle == db_title:
@@ -509,16 +305,40 @@ def add_new_events_step(live_feed, my_events):
         if already_exists:
             continue
 
-        links = feed_match.get("streaming_links") or feed_match.get("links") or feed_match.get("streams") or feed_match.get("channels") or []
+        item_tuple = (feed_match, match_utc_dt, t_a_raw, t_b_raw, f_title)
+
+        # এপিআইতে থাকা মানেই লাইভ অথবা আপকামিং
+        if match_utc_dt <= now_utc:
+            live_candidates.append(item_tuple)
+        else:
+            upcoming_candidates.append(item_tuple)
+
+    upcoming_candidates.sort(key=lambda x: x[1])
+
+    to_add_list = []
+    to_add_list.extend(live_candidates)  
+    to_add_list.extend(upcoming_candidates[:MAX_UPCOMING_ADD_PER_RUN])  
+
+    added_count = 0
+
+    for feed_match, match_utc_dt, t_a_raw, t_b_raw, f_title in to_add_list:
+        links = feed_match.get("streaming_links") or feed_match.get("links") or []
         formatted_links = format_links_data(links)
 
-        logo1 = fix_image_url(feed_match.get("teamAFlag") or feed_match.get("team1_logo") or feed_match.get("logo1"))
-        logo2 = fix_image_url(feed_match.get("teamBFlag") or feed_match.get("team2_logo") or feed_match.get("logo2"))
-        t_logo = fix_image_url(feed_match.get("eventLogo") or feed_match.get("tournament_logo") or feed_match.get("categoryLogo"))
-        banner_16x9 = get_match_banner_image_16x9(logo1, logo2, t_logo)
+        logo1 = fix_image_url(feed_match.get("teamAFlag") or feed_match.get("team1_logo"))
+        logo2 = fix_image_url(feed_match.get("teamBFlag") or feed_match.get("team2_logo"))
+        t_logo = fix_image_url(feed_match.get("eventLogo") or feed_match.get("tournament_logo"))
         category = feed_match.get("category") or "Football"
 
         unique_slug = f"links/{int(time.time() * 1000)}_{added_count}"
+
+        utc_time_str = match_utc_dt.strftime("%H:%M:%S")
+        utc_date_str = match_utc_dt.strftime("%d/%m/%Y")
+        
+        # ফ্রন্টএন্ডের জন্য একটি ডিফল্ট এন্ড টাইম দেওয়া হলো, তবে লজিক শুধু API এর ওপর নির্ভর করবে
+        match_end_utc = match_utc_dt + timedelta(hours=3)
+        utc_end_time_str = match_end_utc.strftime("%H:%M:%S")
+        utc_end_date_str = match_end_utc.strftime("%d/%m/%Y")
 
         new_event_dict = {
             "visible": True,
@@ -531,15 +351,16 @@ def add_new_events_step(live_feed, my_events):
             "teamBName": t_b_raw,
             "teamAFlag": logo1,
             "teamBFlag": logo2,
-            "notiThumb": banner_16x9,
-            "date": match_bd_dt.strftime("%d/%m/%Y"),
-            "time": match_bd_dt.strftime("%I:%M:%S %p"),
+            "date": utc_date_str,
+            "time": utc_time_str,
+            "notiThumb": "",
             "countryCodes": "",
             "whitelistCountryCodes": "",
             "messages": "{}",
-            "end_date": end_dt.strftime("%d/%m/%Y"),
-            "end_time": end_dt.strftime("%I:%M:%S %p"),
-            "links": unique_slug
+            "end_date": utc_end_date_str,
+            "end_time": utc_end_time_str,
+            "links": unique_slug,
+            "created_at": int(time.time() * 1000)
         }
 
         links_json_str = json.dumps(formatted_links)
@@ -552,51 +373,38 @@ def add_new_events_step(live_feed, my_events):
             "requestData": generate_security_token()
         }
 
-        success = False
         for attempt in range(3):
             try:
                 insert_payload["requestData"] = generate_security_token()
-                in_res = session.post(BASE_URL + "admin/add_event", json=insert_payload, timeout=15)
+                in_res = requests.post(BASE_URL + "admin/add_event", json=insert_payload, headers=get_headers(), timeout=15)
                 if in_res.status_code in [200, 201]:
                     added_count += 1
-                    print(f"[Added Event {added_count}/{MAX_ADD_PER_RUN}] {t_a_raw} vs {t_b_raw} | BD Time: {match_bd_dt.strftime('%I:%M %p')}")
-                    # লোকাল স্টেট আপডেটে নতুন ইভেন্ট যুক্ত করা
+                    lbl = "🔴 LIVE" if match_utc_dt <= now_utc else "UPCOMING"
+                    print(f"[{lbl} Added {added_count}] {t_a_raw} vs {t_b_raw} | UTC Time: {utc_date_str} {utc_time_str}")
                     my_events.append(new_event_dict)
-                    success = True
-                    time.sleep(0.8)
+                    time.sleep(1.8)
                     break
                 else:
-                    print(f"[Add API Rejected] HTTP {in_res.status_code}: {in_res.text[:100]}")
-                    time.sleep(0.8)
-            except Exception as e:
-                print(f"[Add Exception]: {e}")
-                time.sleep(0.8)
+                    time.sleep(1.5)
+            except Exception:
+                time.sleep(1.5)
 
-        if not success:
-            print(f"[Skipped/Failed] {t_a_raw} vs {t_b_raw}")
-
-    print(f"--- Finished Addition Step: Added {added_count} Events ---\n")
     return added_count
 
-def sync_streaming_links_step(live_feed, my_events):
-    now_bd = datetime.now(BD_TZ)
+def sync_streaming_links_and_reset_utc_time(live_feed, my_events):
     indexed_feed = []
 
     for f in live_feed:
-        t_a = clean_name(f.get("teamAName") or f.get("teamA") or f.get("team1") or f.get("team1_name") or "")
-        t_b = clean_name(f.get("teamBName") or f.get("teamB") or f.get("team2") or f.get("team2_name") or "")
-        cat = clean_name(f.get("category") or "")
-        title = clean_name(f.get("eventName") or f.get("name") or f.get("title") or f.get("tournament") or "")
-        links = f.get("streaming_links") or f.get("links") or f.get("streams") or f.get("channels") or []
-        raw_status = str(f.get("matchStatus") or f.get("status") or "").lower()
+        t_a = clean_name(f.get("teamAName") or f.get("teamA") or "")
+        t_b = clean_name(f.get("teamBName") or f.get("teamB") or "")
+        title = clean_name(f.get("eventName") or f.get("name") or "")
+        links = f.get("streaming_links") or f.get("links") or []
 
         indexed_feed.append({
             "teamA": t_a,
             "teamB": t_b,
-            "category": cat,
             "title": title,
             "streaming_links": links,
-            "status": raw_status,
             "raw_feed": f
         })
 
@@ -609,17 +417,12 @@ def sync_streaming_links_step(live_feed, my_events):
 
         ev_data = item_db
         if "event" in item_db and isinstance(item_db["event"], str):
-            try:
-                ev_data = json.loads(item_db["event"])
-            except Exception:
-                pass
+            try: ev_data = json.loads(item_db["event"])
+            except Exception: pass
 
-        my_a = clean_name(ev_data.get("teamAName") or item_db.get("teamAName") or ev_data.get("team1"))
-        my_b = clean_name(ev_data.get("teamBName") or item_db.get("teamBName") or ev_data.get("team2"))
-        my_title = clean_name(ev_data.get("eventName") or ev_data.get("tournament") or ev_data.get("title"))
-
-        if not my_a and not my_title:
-            continue
+        my_a = clean_name(ev_data.get("teamAName") or item_db.get("teamAName"))
+        my_b = clean_name(ev_data.get("teamBName") or item_db.get("teamBName"))
+        my_title = clean_name(ev_data.get("eventName") or item_db.get("eventName") or ev_data.get("tournament"))
 
         matched_match = None
         for inf in indexed_feed:
@@ -635,40 +438,18 @@ def sync_streaming_links_step(live_feed, my_events):
             continue
 
         f_obj = matched_match["raw_feed"]
-        _, correct_bd_dt = parse_feed_time_to_bd(f_obj.get("date"), f_obj.get("time"))
-        correct_time_str = correct_bd_dt.strftime("%I:%M:%S %p")
-        correct_date_str = correct_bd_dt.strftime("%d/%m/%Y")
+        correct_utc_dt = parse_feed_utc_dt(f_obj.get("date"), f_obj.get("time"))
+        end_utc_dt = correct_utc_dt + timedelta(hours=3)
+
+        correct_time_str = correct_utc_dt.strftime("%H:%M:%S")
+        correct_date_str = correct_utc_dt.strftime("%d/%m/%Y")
+        correct_end_time = end_utc_dt.strftime("%H:%M:%S")
+        correct_end_date = end_utc_dt.strftime("%d/%m/%Y")
 
         ev_data["time"] = correct_time_str
         ev_data["date"] = correct_date_str
-
-        _, feed_end_bd = parse_feed_time_to_bd(
-            f_obj.get("end_date") or f_obj.get("endDate"),
-            f_obj.get("end_time") or f_obj.get("endTime")
-        )
-        sport_dur = get_exact_sport_duration_minutes(ev_data)
-
-        if matched_match["status"] in ["live_ended", "finished", "ended", "completed", "ft"]:
-            past_dt = now_bd - timedelta(minutes=5)
-            ev_data["end_date"] = past_dt.strftime("%d/%m/%Y")
-            ev_data["end_time"] = past_dt.strftime("%I:%M:%S %p")
-        elif feed_end_bd and feed_end_bd > correct_bd_dt:
-            ev_data["end_date"] = feed_end_bd.strftime("%d/%m/%Y")
-            ev_data["end_time"] = feed_end_bd.strftime("%I:%M:%S %p")
-        elif f_obj.get("duration") and str(f_obj.get("duration")).isdigit():
-            dur_mins = int(f_obj.get("duration"))
-            end_dt = correct_bd_dt + timedelta(minutes=dur_mins)
-            ev_data["end_date"] = end_dt.strftime("%d/%m/%Y")
-            ev_data["end_time"] = end_dt.strftime("%I:%M:%S %p")
-        else:
-            end_dt = correct_bd_dt + timedelta(minutes=sport_dur)
-            ev_data["end_date"] = end_dt.strftime("%d/%m/%Y")
-            ev_data["end_time"] = end_dt.strftime("%I:%M:%S %p")
-
-        l1 = ev_data.get("teamAFlag") or f_obj.get("teamAFlag") or f_obj.get("team1_logo")
-        l2 = ev_data.get("teamBFlag") or f_obj.get("teamBFlag") or f_obj.get("team2_logo")
-        t_logo = ev_data.get("eventLogo") or f_obj.get("eventLogo") or f_obj.get("tournament_logo")
-        ev_data["notiThumb"] = get_match_banner_image_16x9(l1, l2, t_logo)
+        ev_data["end_time"] = correct_end_time
+        ev_data["end_date"] = correct_end_date
 
         formatted_links = format_links_data(matched_match["streaming_links"])
         links_path = str(item_db.get("linksPath") or ev_data.get("linksPath") or ev_data.get("links") or f"links/{event_id}")
@@ -682,78 +463,60 @@ def sync_streaming_links_step(live_feed, my_events):
         }
 
         try:
-            up_res = session.post(BASE_URL + "admin/update_event", json=payload, timeout=12)
+            up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
             if up_res.status_code == 200:
-                print(f"[Updated BD Time] ID: {event_id} | {ev_data.get('teamAName')} vs {ev_data.get('teamBName')} -> {correct_time_str}")
                 updated_count += 1
-            else:
-                print(f"[Update Failed] ID: {event_id} | HTTP {up_res.status_code}")
+                time.sleep(0.5)
         except Exception as e:
-            print(f"Error updating ID {event_id}:", e)
+            pass
 
     return updated_count
 
-def run_single_sync_cycle():
+def main():
     if not FEED_SOURCE:
         print("Error: SECRET_FEED_SOURCE environment variable is not configured.")
         return
 
-    my_events = get_my_saved_events()
-    print(f"\n[Cycle Started: {datetime.now(BD_TZ).strftime('%Y-%m-%d %I:%M:%S %p')}]")
-    print(f"Total Events currently in Panel: {len(my_events)}")
-
-    # ১. ডুপ্লিকেট সরানো
-    my_events, dup_removed = remove_duplicate_events_step(my_events)
-
-    # ২. মেয়াদোত্তীর্ণ ম্যাচ ৫০টির বেশি হলে ডিলিট করা
-    my_events, deleted = delete_expired_events_step(my_events)
-
+    # প্রথমেই API Feed ফেচ করা হলো যাতে Finished লজিক API এর ওপর ভিত্তি করে চলতে পারে
     try:
-        res = session.get(FEED_SOURCE, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+        res = requests.get(FEED_SOURCE, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
         if res.status_code != 200:
             print("Feed fetch failed:", res.status_code)
             return
         live_feed = res.json()
-        if isinstance(live_feed, dict):
-            for k in ["events", "matches", "data", "result", "items", "live"]:
-                if isinstance(live_feed.get(k), list):
-                    live_feed = live_feed[k]
-                    break
     except Exception as e:
         print("Feed load error:", e)
         return
 
-    print(f"Total Matches found in Feed: {len(live_feed)}")
+    print(f"Total Matches found in Feed API: {len(live_feed)}")
 
-    # ৩. নতুন লাইভ/আপকামিং ম্যাচ যোগ করা
-    added = add_new_events_step(live_feed, my_events)
+    my_events = get_my_saved_events()
+    print(f"Total Events currently in Panel: {len(my_events)}")
 
-    # ৪. নতুন ম্যাচ ঢুকলে প্যানেল রিফ্রেশ করে নতুন আইডি পাওয়া
-    if added > 0:
-        time.sleep(1.0)
+    # ১. ডুপ্লিকেট ম্যাচ পরিষ্কার করা
+    dup_removed = remove_duplicate_events_step(my_events)
+    if dup_removed > 0:
+        time.sleep(2)
         my_events = get_my_saved_events()
 
-    # ৫. চলমান লিংক ও স্ট্যাটাস সিঙ্ক করা
-    updated = sync_streaming_links_step(live_feed, my_events)
+    # ২. সম্পূর্ণ API নির্ভর Finished ইভেন্ট ম্যানেজমেন্ট (Duration মুক্ত)
+    deleted = manage_finished_events_step(my_events, live_feed)
+    if deleted > 0:
+        time.sleep(2)
+        my_events = get_my_saved_events()
 
+    # ৩. ডাটাবেসের পুরোনো ম্যাচগুলোর সময় ঠিক করা ও রিব্র্যান্ডেড লিঙ্ক সিঙ্ক করা
+    updated = sync_streaming_links_and_reset_utc_time(live_feed, my_events)
+    if updated > 0:
+        time.sleep(2)
+        my_events = get_my_saved_events()
+
+    # ৪. লাইভ ও আপকামিং ম্যাচ যোগ করা
+    added = add_events_step(live_feed, my_events)
+
+    print("\n==========================================")
+    print(f"Finished! Duplicates: {dup_removed} | API End Deleted: {deleted} | Synced: {updated} | Added: {added}")
     print("==========================================")
-    print(f"Cycle Done | Dup Removed: {dup_removed} | Expired Deleted: {deleted} | Added: {added} | Synced: {updated}")
-    print("==========================================")
-
-def main():
-    if os.getenv("GITHUB_ACTIONS") == "true" or os.getenv("SINGLE_RUN") == "true":
-        run_single_sync_cycle()
-        return
-
-    print("Starting Continuous Auto-Sync Engine (5-minute loop)...")
-    while True:
-        try:
-            run_single_sync_cycle()
-        except Exception as e:
-            print("Cycle Error:", e)
-
-        print(f"Sleeping for {LOOP_INTERVAL_SECONDS} seconds...")
-        time.sleep(LOOP_INTERVAL_SECONDS)
 
 if __name__ == "__main__":
     main()
