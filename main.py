@@ -121,6 +121,7 @@ def remove_duplicate_events_step(my_events):
 
         if match_key in seen:
             del_payload = {
+                "from": "events",
                 "id": int(event_id) if str(event_id).isdigit() else str(event_id),
                 "requestData": generate_security_token()
             }
@@ -129,7 +130,7 @@ def remove_duplicate_events_step(my_events):
                 if del_res.status_code in [200, 201]:
                     deleted_dup += 1
                     print(f"[Duplicate Removed] ID: {event_id} | {t_a} vs {t_b}")
-                    time.sleep(0.8)
+                    time.sleep(0.4)
             except Exception as e:
                 print(f"Error removing duplicate {event_id}:", e)
         else:
@@ -137,11 +138,10 @@ def remove_duplicate_events_step(my_events):
 
     return deleted_dup
 
-# ২. সম্পূর্ণ API নির্ভর Finished ইভেন্ট ম্যানেজমেন্ট (Duration মুক্ত)
+# ২. সম্পূর্ণ API নির্ভর Finished ইভেন্ট ম্যানেজমেন্ট
 def manage_finished_events_step(my_events, live_feed):
     finished_list = []
     
-    # বর্তমান লাইভ ফিডের ম্যাচগুলোর কী (Key) তৈরি করা
     live_feed_keys = set()
     for f in live_feed:
         t_a = clean_name(f.get("teamAName") or f.get("teamA") or f.get("team1"))
@@ -175,21 +175,31 @@ def manage_finished_events_step(my_events, live_feed):
         elif db_title and (db_title,) in live_feed_keys:
             is_in_api = True
 
-        # যদি API-তে ম্যাচটি না থাকে, তবে সেটি Finished
+        # API ফিডে না থাকলে সেটি ফিনিশড
         if not is_in_api:
+            created_val = ev_data.get("created_at") or item_db.get("created_at") or 0
+            try:
+                created_val = int(created_val)
+            except:
+                created_val = 0
+
             finished_list.append({
                 "id": event_id,
-                "created_at": ev_data.get("created_at") or 0,
+                "created_at": created_val,
                 "t_a": ev_data.get("teamAName") or item_db.get("teamAName") or "Event",
                 "t_b": ev_data.get("teamBName") or item_db.get("teamBName") or ""
             })
 
-    # পুরোনো ফিনিশড ম্যাচগুলো চিহ্নিত করে মুছে ফেলা
+    # সাম্প্রতিক থেকে পুরোনো ক্রমে সর্ট করা
+    finished_list.sort(key=lambda x: x["created_at"], reverse=True)
+
+    # সাম্প্রতিক ১২টি রেখে বাকিগুলো মুছে ফেলা
     to_delete = finished_list[KEEP_FINISHED_LIMIT:]
     deleted_count = 0
 
     for item in to_delete:
         del_payload = {
+            "from": "events",
             "id": int(item["id"]) if str(item["id"]).isdigit() else str(item["id"]),
             "requestData": generate_security_token()
         }
@@ -198,7 +208,7 @@ def manage_finished_events_step(my_events, live_feed):
             if del_res.status_code in [200, 201]:
                 deleted_count += 1
                 print(f"[API Removed - Deleted Old Finished] ID: {item['id']} | {item['t_a']} vs {item['t_b']}")
-                time.sleep(0.8)
+                time.sleep(0.4)
         except Exception as e:
             print(f"Error deleting event {item['id']}:", e)
 
@@ -220,7 +230,6 @@ def format_links_data(streaming_links):
         
         name_upper = original_name.upper().replace(" ", "")
         
-        # রিব্র্যান্ডিং লজিক
         if any(x in name_upper for x in ["LOWQUALITY", "USEVPN", "LINK", "STREAMTV+HD"]):
             if dlsports_counter == 1:
                 name = "DLSPORTS"
@@ -256,7 +265,7 @@ def format_links_data(streaming_links):
             })
     return formatted
 
-# ৩. লাইভ ম্যাচ আগে এবং এরপর আপকামিং ম্যাচ ক্রমান্বয়ে অ্যাড করা
+# ৩. লাইভ ও আপকামিং ম্যাচ যোগ করা
 def add_events_step(live_feed, my_events):
     now_utc = datetime.now(timezone.utc)
 
@@ -307,7 +316,6 @@ def add_events_step(live_feed, my_events):
 
         item_tuple = (feed_match, match_utc_dt, t_a_raw, t_b_raw, f_title)
 
-        # এপিআইতে থাকা মানেই লাইভ অথবা আপকামিং
         if match_utc_dt <= now_utc:
             live_candidates.append(item_tuple)
         else:
@@ -335,8 +343,8 @@ def add_events_step(live_feed, my_events):
         utc_time_str = match_utc_dt.strftime("%H:%M:%S")
         utc_date_str = match_utc_dt.strftime("%d/%m/%Y")
         
-        # ফ্রন্টএন্ডের জন্য একটি ডিফল্ট এন্ড টাইম দেওয়া হলো, তবে লজিক শুধু API এর ওপর নির্ভর করবে
-        match_end_utc = match_utc_dt + timedelta(hours=3)
+        # ডিউরেশন ফিক্স: ৩ ঘণ্টার বদলে ২৪ ঘণ্টা রাখা হয়েছে যাতে অ্যাপ নিজে থেকে ম্যাচ ফিনিশড না করে
+        match_end_utc = match_utc_dt + timedelta(hours=24)
         utc_end_time_str = match_end_utc.strftime("%H:%M:%S")
         utc_end_date_str = match_end_utc.strftime("%d/%m/%Y")
 
@@ -382,12 +390,12 @@ def add_events_step(live_feed, my_events):
                     lbl = "🔴 LIVE" if match_utc_dt <= now_utc else "UPCOMING"
                     print(f"[{lbl} Added {added_count}] {t_a_raw} vs {t_b_raw} | UTC Time: {utc_date_str} {utc_time_str}")
                     my_events.append(new_event_dict)
-                    time.sleep(1.8)
+                    time.sleep(1.2)
                     break
                 else:
-                    time.sleep(1.5)
+                    time.sleep(1.0)
             except Exception:
-                time.sleep(1.5)
+                time.sleep(1.0)
 
     return added_count
 
@@ -439,7 +447,9 @@ def sync_streaming_links_and_reset_utc_time(live_feed, my_events):
 
         f_obj = matched_match["raw_feed"]
         correct_utc_dt = parse_feed_utc_dt(f_obj.get("date"), f_obj.get("time"))
-        end_utc_dt = correct_utc_dt + timedelta(hours=3)
+        
+        # ডিউরেশন ফিক্স: সিঙ্কের ক্ষেত্রেও বাড়িয়ে ২৪ ঘণ্টা করা হলো
+        end_utc_dt = correct_utc_dt + timedelta(hours=24)
 
         correct_time_str = correct_utc_dt.strftime("%H:%M:%S")
         correct_date_str = correct_utc_dt.strftime("%d/%m/%Y")
@@ -466,7 +476,7 @@ def sync_streaming_links_and_reset_utc_time(live_feed, my_events):
             up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
             if up_res.status_code == 200:
                 updated_count += 1
-                time.sleep(0.5)
+                time.sleep(0.4)
         except Exception as e:
             pass
 
@@ -477,7 +487,6 @@ def main():
         print("Error: SECRET_FEED_SOURCE environment variable is not configured.")
         return
 
-    # প্রথমেই API Feed ফেচ করা হলো যাতে Finished লজিক API এর ওপর ভিত্তি করে চলতে পারে
     try:
         res = requests.get(FEED_SOURCE, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
         if res.status_code != 200:
@@ -496,19 +505,19 @@ def main():
     # ১. ডুপ্লিকেট ম্যাচ পরিষ্কার করা
     dup_removed = remove_duplicate_events_step(my_events)
     if dup_removed > 0:
-        time.sleep(2)
+        time.sleep(1.5)
         my_events = get_my_saved_events()
 
-    # ২. সম্পূর্ণ API নির্ভর Finished ইভেন্ট ম্যানেজমেন্ট (Duration মুক্ত)
+    # ২. সমাপ্ত ম্যাচ পরিষ্কার করা
     deleted = manage_finished_events_step(my_events, live_feed)
     if deleted > 0:
-        time.sleep(2)
+        time.sleep(1.5)
         my_events = get_my_saved_events()
 
-    # ৩. ডাটাবেসের পুরোনো ম্যাচগুলোর সময় ঠিক করা ও রিব্র্যান্ডেড লিঙ্ক সিঙ্ক করা
+    # ৩. ডাটাবেসের পুরোনো ম্যাচগুলোর সময় ঠিক করা ও লিঙ্ক সিঙ্ক করা
     updated = sync_streaming_links_and_reset_utc_time(live_feed, my_events)
     if updated > 0:
-        time.sleep(2)
+        time.sleep(1.5)
         my_events = get_my_saved_events()
 
     # ৪. লাইভ ও আপকামিং ম্যাচ যোগ করা
