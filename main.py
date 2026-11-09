@@ -10,10 +10,7 @@ import requests
 BASE_URL = "https://dlsports.proapp.workers.dev/"
 FEED_SOURCE = os.getenv("SECRET_FEED_SOURCE", "")
 
-# আপকামিং ম্যাচ প্রতি রানে ধাপে ধাপে অ্যাড হওয়ার সীমা
 MAX_UPCOMING_ADD_PER_RUN = 6
-
-# Finished ট্যাবে সবসময় সাম্প্রতিক ১২টি সমাপ্ত ম্যাচ থাকবে
 KEEP_FINISHED_LIMIT = 12
 
 def generate_security_token():
@@ -48,7 +45,95 @@ def fix_image_url(url):
         url = url.replace("api.sofascore.com", "img.sofascore.com")
     return url
 
-# ফিডের আন্তর্জাতিক UTC সময় পার্সার
+def get_exact_sport_duration_minutes(match):
+    def to_l(s):
+        return str(s).lower() if s else ""
+
+    cat = to_l(match.get("category"))
+    tour = to_l(match.get("tournament") or match.get("eventName") or match.get("name"))
+    t1 = to_l(match.get("team1_name") or match.get("team1") or match.get("teamAName"))
+    t2 = to_l(match.get("team2_name") or match.get("team2") or match.get("teamBName"))
+    title = to_l(match.get("title"))
+    combined = f"{cat} {tour} {title} {t1} {t2}"
+
+    is_final = "final" in combined and "semi" not in combined and "quarter" not in combined
+    is_semi = "semi" in combined
+    is_quarter = "quarter" in combined
+    is_knockout = is_semi or is_quarter or any(k in combined for k in ["round of 16", "round of 8", "round of 32", "r16", "r32", "playoff", "play-off", "knockout"])
+
+    if any(k in combined for k in ["evento", "sports live", "tv channel"]):
+        if "tennis" in combined: return 960
+        if "cycling" in combined: return 480
+        if "golf" in combined: return 720
+        if "tabel tennis" in combined or "table tennis" in combined: return 480
+        if "judo" in combined or "wrestling" in combined: return 480
+        return 960
+
+    if "tennis" in combined:
+        if is_final or any(k in combined for k in ["grand slam", "wimbledon", "us open", "french open", "australian open"]):
+            return 330
+        return 240
+
+    if "cricket" in combined or "cricket" in cat:
+        if any(k in combined for k in ["hong kong sixes", "hk sixes", "hong kong 6s"]):
+            return 570
+        if "nepal premier" in combined or "npl" in combined:
+            t_str = str(match.get("time") or "").lower()
+            if any(k in t_str for k in ["12:", "01:", "1:", "11:"]):
+                return 510
+            return 230
+        if any(k in combined for k in ["test", "ranji", "sheffield", "county", "4-day"]):
+            return 540
+        if any(k in combined for k in ["odi", "one day", "50 over", "world cup", "trophy", "u19"]):
+            return 540 if is_final else 510
+        if "ipl" in combined or "indian premier" in combined:
+            return 260 if is_final else 240
+        if any(k in combined for k in ["t20", "bpl", "psl", "bbl", "big bash", "cpl", "sa20", "mlc", "ilt20", "super smash"]):
+            return 260 if is_final else 230
+        if "hundred" in combined: return 160
+        if "t15" in combined: return 140
+        if any(k in combined for k in ["t10", "ten10", "abu dhabi"]): return 100
+        if "t5" in combined or "sixes" in combined: return 60
+        return 230
+
+    if "football" in combined or "soccer" in combined or "football" in cat:
+        if is_final: return 210
+        if is_knockout: return 195
+        return 180
+
+    if any(k in combined for k in ["nfl", "american football", "cfl", "ncaa"]):
+        return 400 if is_final else 360
+
+    if any(k in combined for k in ["nba", "basketball", "fiba", "euroleague"]):
+        return 210 if (is_final or is_knockout) else 180
+
+    if any(k in combined for k in ["baseball", "mlb", "npb", "kbo"]):
+        return 220
+
+    if any(k in combined for k in ["wwe", "raw", "smackdown", "nxt", "aew", "tna", "wrestling"]):
+        if "raw" in combined: return 200
+        if any(k in combined for k in ["ple", "wrestlemania", "royal rumble", "summer slam"]): return 260
+        return 150
+
+    if any(k in combined for k in ["ufc", "mma", "one fight", "bellator"]):
+        return 240
+
+    if "boxing" in combined: return 210
+
+    if any(k in combined for k in ["formula 1", "f1"]): return 420
+    if any(k in combined for k in ["motogp", "motorgp", "sbk"]): return 480
+    if "nascar" in combined: return 300
+    if "wrc" in combined or "rally" in combined: return 480
+
+    if "horse racing" in combined or "horse" in combined: return 600
+    if "racing" in combined: return 480
+    if "snooker" in combined: return 270
+    if "darts" in combined or "pdc" in combined: return 140
+    if "hockey" in combined or "nhl" in combined: return 180
+    if "kabaddi" in combined: return 70
+
+    return 180
+
 def parse_feed_utc_dt(date_str, time_str):
     now_utc = datetime.now(timezone.utc)
     if not date_str:
@@ -91,7 +176,6 @@ def get_my_saved_events():
         print("Error fetching saved events:", e)
     return []
 
-# ১. ডুপ্লিকেট ম্যাচ পরিষ্কার করা
 def remove_duplicate_events_step(my_events):
     seen = {}
     deleted_dup = 0
@@ -130,7 +214,7 @@ def remove_duplicate_events_step(my_events):
                 if del_res.status_code in [200, 201]:
                     deleted_dup += 1
                     print(f"[Duplicate Removed] ID: {event_id} | {t_a} vs {t_b}")
-                    time.sleep(0.8)
+                    time.sleep(0.3)
             except Exception as e:
                 print(f"Error removing duplicate {event_id}:", e)
         else:
@@ -139,6 +223,7 @@ def remove_duplicate_events_step(my_events):
     return deleted_dup
 
 def manage_finished_events_step(my_events, live_feed):
+    now_utc = datetime.now(timezone.utc)
     finished_list = []
     
     live_feed_keys = set()
@@ -169,12 +254,20 @@ def manage_finished_events_step(my_events, live_feed):
         db_title = clean_name(ev_data.get("eventName") or item_db.get("eventName") or ev_data.get("tournament"))
 
         is_in_api = False
-        if db_a and db_b and tuple(sorted([db_a, db_b])) in live_feed_keys:
-            is_in_api = True
-        elif db_title and (db_title,) in live_feed_keys:
-            is_in_api = True
+        if db_a and db_b:
+            if tuple(sorted([db_a, db_b])) in live_feed_keys:
+                is_in_api = True
+        elif db_title and len(db_title) > 5:
+            if (db_title,) in live_feed_keys:
+                is_in_api = True
 
-        if not is_in_api:
+        end_date_str = ev_data.get("end_date") or item_db.get("end_date")
+        end_time_str = ev_data.get("end_time") or item_db.get("end_time")
+        end_utc_dt = parse_feed_utc_dt(end_date_str, end_time_str)
+
+        is_time_expired = (now_utc > end_utc_dt) if end_date_str else False
+
+        if not is_in_api or is_time_expired:
             c_time = ev_data.get("created_at") or item_db.get("created_at") or 0
             try:
                 c_time = int(c_time)
@@ -193,7 +286,7 @@ def manage_finished_events_step(my_events, live_feed):
     to_delete = finished_list[KEEP_FINISHED_LIMIT:]
     deleted_count = 0
 
-    print(f"Total Finished matches found: {len(finished_list)} | Deleting: {len(to_delete)}")
+    print(f"Total Finished detected: {len(finished_list)} | Deleting old: {len(to_delete)}")
 
     for item in to_delete:
         del_payload = {
@@ -230,7 +323,6 @@ def format_links_data(streaming_links):
         
         name_upper = original_name.upper().replace(" ", "")
         
-        # রিব্র্যান্ডিং লজিক
         if any(x in name_upper for x in ["LOWQUALITY", "USEVPN", "LINK", "STREAMTV+HD"]):
             if dlsports_counter == 1:
                 name = "DLSPORTS"
@@ -266,7 +358,6 @@ def format_links_data(streaming_links):
             })
     return formatted
 
-# ৩. লাইভ ম্যাচ আগে এবং এরপর আপকামিং ম্যাচ ক্রমান্বয়ে অ্যাড করা
 def add_events_step(live_feed, my_events):
     now_utc = datetime.now(timezone.utc)
 
@@ -315,9 +406,8 @@ def add_events_step(live_feed, my_events):
         if already_exists:
             continue
 
-        item_tuple = (feed_match, match_utc_dt, t_a_raw, t_b_raw, f_title)
+        item_tuple = (feed_match, match_utc_dt, t_a_raw, t_b_raw, f_title, time_val)
 
-        # এপিআইতে থাকা মানেই লাইভ অথবা আপকামিং
         if match_utc_dt <= now_utc:
             live_candidates.append(item_tuple)
         else:
@@ -331,7 +421,7 @@ def add_events_step(live_feed, my_events):
 
     added_count = 0
 
-    for feed_match, match_utc_dt, t_a_raw, t_b_raw, f_title in to_add_list:
+    for feed_match, match_utc_dt, t_a_raw, t_b_raw, f_title, time_val in to_add_list:
         links = feed_match.get("streaming_links") or feed_match.get("links") or []
         formatted_links = format_links_data(links)
 
@@ -345,8 +435,15 @@ def add_events_step(live_feed, my_events):
         utc_time_str = match_utc_dt.strftime("%H:%M:%S")
         utc_date_str = match_utc_dt.strftime("%d/%m/%Y")
         
-        # ফ্রন্টএন্ডের জন্য একটি ডিফল্ট এন্ড টাইম দেওয়া হলো, তবে লজিক শুধু API এর ওপর নির্ভর করবে
-        match_end_utc = match_utc_dt + timedelta(hours=24)
+        duration_minutes = get_exact_sport_duration_minutes({
+            "category": category,
+            "tournament": f_title,
+            "title": f_title,
+            "team1_name": t_a_raw,
+            "team2_name": t_b_raw,
+            "time": time_val
+        })
+        match_end_utc = match_utc_dt + timedelta(minutes=duration_minutes)
         utc_end_time_str = match_end_utc.strftime("%H:%M:%S")
         utc_end_date_str = match_end_utc.strftime("%d/%m/%Y")
 
@@ -389,7 +486,7 @@ def add_events_step(live_feed, my_events):
                 in_res = requests.post(BASE_URL + "admin/add_event", json=insert_payload, headers=get_headers(), timeout=15)
                 if in_res.status_code in [200, 201]:
                     added_count += 1
-                    lbl = "🔴 LIVE" if match_utc_dt <= now_utc else "UPCOMING"
+                    lbl = "LIVE" if match_utc_dt <= now_utc else "UPCOMING"
                     print(f"[{lbl} Added {added_count}] {t_a_raw} vs {t_b_raw} | UTC Time: {utc_date_str} {utc_time_str}")
                     my_events.append(new_event_dict)
                     time.sleep(1.8)
@@ -449,7 +546,16 @@ def sync_streaming_links_and_reset_utc_time(live_feed, my_events):
 
         f_obj = matched_match["raw_feed"]
         correct_utc_dt = parse_feed_utc_dt(f_obj.get("date"), f_obj.get("time"))
-        end_utc_dt = correct_utc_dt + timedelta(hours=24)
+        
+        duration_minutes = get_exact_sport_duration_minutes({
+            "category": f_obj.get("category"),
+            "tournament": matched_match.get("title"),
+            "title": matched_match.get("title"),
+            "team1_name": matched_match.get("teamA"),
+            "team2_name": matched_match.get("teamB"),
+            "time": f_obj.get("time")
+        })
+        end_utc_dt = correct_utc_dt + timedelta(minutes=duration_minutes)
 
         correct_time_str = correct_utc_dt.strftime("%H:%M:%S")
         correct_date_str = correct_utc_dt.strftime("%d/%m/%Y")
@@ -476,7 +582,7 @@ def sync_streaming_links_and_reset_utc_time(live_feed, my_events):
             up_res = requests.post(BASE_URL + "admin/update_event", json=payload, headers=get_headers(), timeout=12)
             if up_res.status_code == 200:
                 updated_count += 1
-                time.sleep(0.5)
+                time.sleep(0.3)
         except Exception as e:
             pass
 
@@ -487,7 +593,6 @@ def main():
         print("Error: SECRET_FEED_SOURCE environment variable is not configured.")
         return
 
-    # প্রথমেই API Feed ফেচ করা হলো যাতে Finished লজিক API এর ওপর ভিত্তি করে চলতে পারে
     try:
         res = requests.get(FEED_SOURCE, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
         if res.status_code != 200:
@@ -503,25 +608,21 @@ def main():
     my_events = get_my_saved_events()
     print(f"Total Events currently in Panel: {len(my_events)}")
 
-    # ১. ডুপ্লিকেট ম্যাচ পরিষ্কার করা
     dup_removed = remove_duplicate_events_step(my_events)
     if dup_removed > 0:
-        time.sleep(2)
+        time.sleep(1)
         my_events = get_my_saved_events()
 
-    # ২. সম্পূর্ণ API নির্ভর Finished ইভেন্ট ম্যানেজমেন্ট (Duration মুক্ত)
     deleted = manage_finished_events_step(my_events, live_feed)
     if deleted > 0:
-        time.sleep(2)
+        time.sleep(1)
         my_events = get_my_saved_events()
 
-    # ৩. ডাটাবেসের পুরোনো ম্যাচগুলোর সময় ঠিক করা ও রিব্র্যান্ডেড লিঙ্ক সিঙ্ক করা
     updated = sync_streaming_links_and_reset_utc_time(live_feed, my_events)
     if updated > 0:
-        time.sleep(2)
+        time.sleep(1)
         my_events = get_my_saved_events()
 
-    # ৪. লাইভ ও আপকামিং ম্যাচ যোগ করা
     added = add_events_step(live_feed, my_events)
 
     print("\n==========================================")
