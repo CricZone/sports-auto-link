@@ -291,7 +291,7 @@ def manage_finished_events_step(my_events, live_feed):
     for item in to_delete:
         del_payload = {
             "from": "events",
-            "id": int(item["id"]) if str(item["id"]).isdigit() else str(item["id"]),
+            "id": str(item["id"]),
             "requestData": generate_security_token()
         }
         try:
